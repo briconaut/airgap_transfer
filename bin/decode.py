@@ -20,6 +20,14 @@ einem Glob-Pattern bestehen — decode.py sucht ueberall im kombinierten
 Zeilenstrom nach Seiten-Praeambeln und setzt die Seiten anhand ihrer
 Zeilennummern zusammen, unabhaengig von der Reihenfolge der Eingabe.
 
+UTF-8 vs. UTF-16LE (siehe --preset utf16le128/utf16le256 in encode.py) wird
+PRO QUELLE automatisch anhand der Rohbytes erkannt, ohne die Datei neu zu
+oeffnen: das Header-Alphabet ist immer reines 7-Bit-ASCII und 0x00 ist in
+jedem Alphabet verboten, also kann UTF-8 nie ein rohes 0x00-Byte enthalten,
+waehrend ASCII als UTF-16LE immer "Byte, 0x00"-Paare erzeugt - eindeutig
+erkennbar an den ersten paar Bytes, auch ohne BOM (wichtig, wenn eine
+Seite als eigene Datei ohne den fuehrenden BOM der Gesamtdatei vorliegt).
+
 Formatfehler (falsche Versionsnummer) fuehren zu einem harten Abbruch. Der
 Header EINER Seite ist weiterhin nicht redundant abgesichert (siehe
 README.md) - ist er nicht lesbar, wird NUR diese Seite uebersprungen; erst
@@ -40,7 +48,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from alphabets import Alphabet, DEFAULT_ALPHABET, HEADER_ALPHABET
 from header import (
     HeaderError, parse_preamble, parse_header_lines, unpack_header, HEADER_COPIES,
-    find_preamble_positions,
+    find_preamble_positions, TEXT_ENCODING_UTF16LE,
 )
 from rs_codec import GaloisField, rs_generator_poly
 from framing import (
@@ -64,19 +72,67 @@ def gather_input_paths(input_args):
     return paths
 
 
+def sniff_and_decode(raw: bytes):
+    """Erkennt UTF-8 vs. UTF-16LE anhand der Rohbytes und decodiert damit -
+    kein erneutes Oeffnen/Lesen noetig (siehe Modul-Docstring). Ein
+    fuehrendes UTF-16LE-BOM (FF FE) wird erkannt und uebersprungen, ist aber
+    fuer die Erkennung selbst NICHT erforderlich: da 0x00 in jedem Alphabet
+    verboten ist (siehe Alphabet.__init__ in alphabets.py) und das Header-
+    Alphabet immer reines 7-Bit-ASCII ist, kann ein UTF-8-Strom nie ein
+    rohes 0x00-Byte enthalten, waehrend ASCII als UTF-16LE IMMER 'Byte,
+    0x00'-Paare erzeugt - eindeutig unterscheidbar an den ersten Bytes.
+    Rueckgabe: (text, encoding_name)."""
+    if raw[:2] == b"\xff\xfe":
+        text, encoding = raw[2:].decode("utf-16-le"), "utf-16-le"
+    elif len(raw) >= 2 and raw[1] == 0:
+        text, encoding = raw.decode("utf-16-le"), "utf-16-le"
+    else:
+        text, encoding = raw.decode("utf-8"), "utf-8"
+    # Binäres Lesen umgeht Pythons Universal-Newlines-Übersetzung (die ein
+    # Text-mode open() automatisch macht) - von Hand nachholen, falls die
+    # Quelle mit \r\n oder \r statt \n endet (z.B. unter Windows erzeugt).
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text, encoding
+
+
 def read_all_input_lines(input_args):
-    """Liest alle Quellen (stdin, oder eine/mehrere Dateien/Patterns) und
-    haengt ihre Zeilenlisten aneinander. Jede Quelle wird EINZELN gesplittet,
-    bevor die Listen zusammengehaengt werden - sonst koennte die letzte Zeile
-    einer Datei mit der ersten Zeile der naechsten verschmelzen."""
+    """Liest alle Quellen (stdin, oder eine/mehrere Dateien/Patterns) als
+    Rohbytes, erkennt und decodiert jede Quelle EINZELN (sniff_and_decode)
+    und haengt die resultierenden Zeilenlisten aneinander - sonst koennte
+    die letzte Zeile einer Datei mit der ersten Zeile der naechsten
+    verschmelzen.
+
+    Rueckgabe: (lines, source_ranges). source_ranges: Liste von
+    (start_idx, end_idx_exklusiv, encoding_name) pro Quelle, fuer den
+    spaeteren Cross-Check gegen das von jeder Seite im Header deklarierte
+    text_encoding-Feld (siehe main())."""
     if not input_args:
-        sys.stdin.reconfigure(encoding="utf-8")
-        return sys.stdin.read().split("\n")
+        sources = [("<stdin>", sys.stdin.buffer.read())]
+    else:
+        sources = []
+        for path in gather_input_paths(input_args):
+            with open(path, "rb") as f:
+                sources.append((path, f.read()))
+
     lines = []
-    for path in gather_input_paths(input_args):
-        with open(path, "r", encoding="utf-8", errors="strict") as f:
-            lines.extend(f.read().split("\n"))
-    return lines
+    source_ranges = []
+    for name, raw in sources:
+        try:
+            text, encoding = sniff_and_decode(raw)
+        except UnicodeDecodeError as e:
+            print(f"FEHLER: {name} laesst sich weder als UTF-8 noch als UTF-16LE lesen ({e}).", file=sys.stderr)
+            sys.exit(1)
+        start = len(lines)
+        lines.extend(text.split("\n"))
+        source_ranges.append((start, len(lines), encoding))
+    return lines, source_ranges
+
+
+def encoding_at(idx, source_ranges):
+    for start, end, encoding in source_ranges:
+        if start <= idx < end:
+            return encoding
+    return "utf-8"  # sollte nie vorkommen - idx stammt immer aus einem der Bereiche
 
 
 def main():
@@ -93,7 +149,7 @@ def main():
     ap.add_argument("--error-report-format", choices=["text", "json"], default="text")
     args = ap.parse_args()
 
-    lines = read_all_input_lines(args.input)
+    lines, source_ranges = read_all_input_lines(args.input)
     if not any(l.strip() for l in lines):
         print("FEHLER: Eingabe ist komplett leer.", file=sys.stderr)
         sys.exit(1)
@@ -122,6 +178,21 @@ def main():
         except HeaderError as e:
             print(f"Hinweis: Header einer Seite nicht rekonstruierbar ({e}) - diese Seite wird uebersprungen.", file=sys.stderr)
             continue
+
+        # Cross-Check: von dieser Seite deklariertes text_encoding-Feld muss
+        # zum tatsaechlich per Byte-Sniffing erkannten Encoding ihrer Quelle
+        # passen (siehe read_all_input_lines/sniff_and_decode). Nicht fatal
+        # fuer den ganzen Lauf - wie jeder andere Seiten-Header-Fehler auch.
+        declared_encoding = "utf-16-le" if meta["text_encoding"] == TEXT_ENCODING_UTF16LE else "utf-8"
+        sniffed_encoding = encoding_at(start, source_ranges)
+        if declared_encoding != sniffed_encoding:
+            print(
+                f"Hinweis: Seite deklariert Encoding {declared_encoding!r}, wurde aber als "
+                f"{sniffed_encoding!r} gelesen - diese Seite wird uebersprungen.",
+                file=sys.stderr,
+            )
+            continue
+
         pages.append(dict(meta=meta, rest_lines=seg_rest_lines))
 
     if not pages:

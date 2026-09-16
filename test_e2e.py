@@ -413,6 +413,100 @@ def test_pagination_missing_page():
     print(" OK: fehlende Seite im Fehlerbericht korrekt gemeldet")
 
 
+def test_preset_utf16le128():
+    print("== Test 12: eingebautes Preset 'utf16le128' (Datei muss echtes UTF-16LE sein) ==")
+    src = f"{WORKDIR}/t12_src.bin"
+    enc = f"{WORKDIR}/t12_enc.txt"
+    out = f"{WORKDIR}/t12_out"
+    make_test_file(src, 8_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "150", "--preset", "utf16le128"])
+    assert r.returncode == 0, r.stderr
+    print(" encode stderr:", r.stderr.strip().splitlines()[-1])
+
+    with open(enc, "rb") as f:
+        raw = f.read()
+    assert raw[:2] == b"\xff\xfe", "Ausgabedatei hat kein fuehrendes UTF-16LE-BOM"
+    assert raw[3] == 0, "Rohbytes sehen nicht nach UTF-16LE aus (High-Byte des ersten Zeichens != 0)"
+
+    r2 = run([sys.executable, DECODE, enc, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: 'utf16le128'-Preset-Roundtrip exakt, Datei ist echtes UTF-16LE mit BOM")
+
+
+def test_preset_utf16le256():
+    print("== Test 13: eingebautes Preset 'utf16le256' ==")
+    src = f"{WORKDIR}/t13_src.bin"
+    enc = f"{WORKDIR}/t13_enc.txt"
+    out = f"{WORKDIR}/t13_out"
+    make_test_file(src, 8_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "150", "--preset", "utf16le256"])
+    assert r.returncode == 0, r.stderr
+    print(" encode stderr:", r.stderr.strip().splitlines()[-1])
+
+    with open(enc, "rb") as f:
+        raw = f.read()
+    assert raw[:2] == b"\xff\xfe", "Ausgabedatei hat kein fuehrendes UTF-16LE-BOM"
+    assert raw[3] == 0, "Rohbytes sehen nicht nach UTF-16LE aus (High-Byte des ersten Zeichens != 0)"
+
+    r2 = run([sys.executable, DECODE, enc, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: 'utf16le256'-Preset-Roundtrip exakt")
+
+
+def test_utf16le_pagination_separate_files():
+    print("== Test 14: utf16le128 + Seitenteilung, Einzeldateien ohne BOM auf Folgeseiten ==")
+    src = f"{WORKDIR}/t14_src.bin"
+    enc = f"{WORKDIR}/t14_enc.txt"
+    out = f"{WORKDIR}/t14_out"
+    make_test_file(src, 25_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20",
+             "--lines", "10", "--preset", "utf16le128"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc, "rb") as f:
+        raw = f.read()
+    assert raw[:2] == b"\xff\xfe"
+    lines = raw[2:].decode("utf-16-le").split("\n")
+    pages = split_pages(lines)
+    assert len(pages) >= 3, f"Testdatei erzeugt zu wenige Seiten ({len(pages)}) fuer diesen Test"
+
+    page_paths = []
+    for i, page in enumerate(pages):
+        p = f"{WORKDIR}/t14_page{i}.txt"
+        # Bewusst OHNE BOM schreiben - simuliert eine aus der Gesamtdatei
+        # herausgeschnittene Einzelseite, die den fuehrenden BOM nie gesehen
+        # hat. decode.py muss UTF-16LE trotzdem am Byte-Muster erkennen.
+        with open(p, "w", encoding="utf-16-le", newline="\n") as f:
+            f.write("\n".join(page) + "\n")
+        page_paths.append(p)
+
+    r2 = run([sys.executable, DECODE, *page_paths, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: UTF-16LE-Einzelseiten ohne BOM korrekt erkannt und zusammengesetzt")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
@@ -425,4 +519,7 @@ if __name__ == "__main__":
     test_pagination_separate_files()
     test_pagination_pattern()
     test_pagination_missing_page()
+    test_preset_utf16le128()
+    test_preset_utf16le256()
+    test_utf16le_pagination_separate_files()
     print("\nAlle End-to-End-Tests bestanden.")

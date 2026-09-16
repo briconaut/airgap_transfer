@@ -21,7 +21,7 @@ import zlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from alphabets import Alphabet, DEFAULT_ALPHABET, make_alphabet, PRESET_NAMES
-from header import pack_header, build_header_lines
+from header import pack_header, build_header_lines, TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE
 from rs_codec import GaloisField, rs_generator_poly, rs_encode
 from framing import compute_layout, build_payload_line, crc_width_for, byte_offset_of_line
 from progress import ProgressBar
@@ -44,7 +44,15 @@ def main():
             "(GF128, ca. 17%% mehr Nutzdaten/Zeile). Erfordert UTF-8-Terminal und OCR. "
             "'utf8128': wie 'latin128', aber die 34 zusaetzlichen Zeichen kommen aus "
             "Latin Extended-A (mittel-/osteuropaeische Diakritika) statt Latin-1 "
-            "(GF128, gleiche Dichte wie 'latin128'). Erfordert UTF-8-Terminal und OCR."
+            "(GF128, gleiche Dichte wie 'latin128'). Erfordert UTF-8-Terminal und OCR. "
+            "'utf16le128': exakt dieselben 128 Zeichen wie 'utf8128', aber die "
+            "AUSGABEDATEI wird als UTF-16LE statt UTF-8 geschrieben (mit BOM) - "
+            "fuer verlustfreien Transfer ueber die Windows-Zwischenablage (deren "
+            "natives Textformat selbst UTF-16LE ist). "
+            "'utf16le256': wie 'utf16le128', aber 256 Zeichen (GF256, 8 Bit/Symbol, "
+            "ca. 14%% dichter) - Box-Drawing/Block-Element-Symbole statt OCR-kuratierter "
+            "Buchstaben, da fuer Zwischenablage-Transfer (nicht OCR) keine visuelle "
+            "Verwechslungsfreiheit noetig ist. decode.py erkennt UTF-16LE automatisch."
         ),
     )
     alpha_group.add_argument(
@@ -83,9 +91,10 @@ def main():
     filename = args.filename if args.filename is not None else default_name
 
     header_alpha = Alphabet(DEFAULT_ALPHABET)
-    payload_alpha, is_custom = make_alphabet(
+    payload_alpha, is_custom, is_utf16le = make_alphabet(
         preset=args.preset, custom_chars=args.alphabet
     )
+    text_encoding = TEXT_ENCODING_UTF16LE if is_utf16le else TEXT_ENCODING_UTF8
 
     gf = GaloisField(payload_alpha.bits_per_symbol)
 
@@ -152,18 +161,26 @@ def main():
         header_bytes = pack_header(
             payload_alpha, is_custom, k, r, len(data), sha256, layout["ln_width"], filename,
             document_id=document_id, page_count=page_count, page_number=page_number,
-            page_checksum=page_checksum,
+            page_checksum=page_checksum, text_encoding=text_encoding,
         )
         preamble, header_lines = build_header_lines(header_bytes, args.width, header_alpha)
         pages.append((preamble, header_lines, payload_lines[start:end]))
 
     # --- Ausgabe -------------------------------------------------------------
+    # "utf-16-le" (Python-Codec) fuegt KEIN BOM automatisch an (anders als das
+    # generische "utf-16") - fuer ein deterministisches Little-Endian-BOM wird
+    # das BOM-Zeichen U+FEFF explizit als allererstes Zeichen geschrieben.
+    # decode.py braucht das BOM nicht zwingend (Byte-Sniffing reicht, siehe
+    # dort), es ist reine Konvention fuer andere Werkzeuge (Notepad etc.).
+    out_encoding = "utf-16-le" if is_utf16le else "utf-8"
     if args.output:
-        out = open(args.output, "w", encoding="utf-8", newline="\n")
+        out = open(args.output, "w", encoding=out_encoding, newline="\n")
     else:
-        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+        sys.stdout.reconfigure(encoding=out_encoding, newline="\n")
         out = sys.stdout
     try:
+        if is_utf16le:
+            out.write(chr(0xFEFF))  # BOM; chr() statt Literal, um jedes Transkriptionsrisiko auszuschliessen
         for page_number, (preamble, header_lines, page_payload_lines) in enumerate(pages):
             out.write(preamble + "\n")
             for line in header_lines:

@@ -36,7 +36,7 @@ import zlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from alphabets import Alphabet, DEFAULT_ALPHABET
-from header import pack_header, build_header_lines
+from header import pack_header, build_header_lines, TEXT_ENCODING_UTF8
 from rs_codec import GaloisField, rs_generator_poly
 from framing import compute_layout, build_payload_line
 from progress import ProgressBar
@@ -189,6 +189,7 @@ def main():
         # ohne --lines.
         document_id=os.urandom(8), page_count=1, page_number=0,
         page_checksum=zlib.crc32(data) & 0xFFFFFFFF,
+        text_encoding=TEXT_ENCODING_UTF8,  # reframe.py schreibt immer ASCII/UTF-8
     )
     preamble, header_lines = build_header_lines(header_bytes, args.width, header_alpha)
 

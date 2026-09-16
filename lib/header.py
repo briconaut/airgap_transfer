@@ -13,9 +13,14 @@ Header-Koerper (3x wiederholt, jede Zeile mit Praefix):
     (bis zu 3) Kopien jeder Position, setzt den Header wieder zusammen.
 
 Header-Rohbytes (das, was bit-geslict wird):
-    magic:            1 Byte  (Formatversion, aktuell 2)
+    magic:            1 Byte  (Formatversion, aktuell 3)
     alphabet_mode:    1 Byte  (0 = Standard-Preset, 1 = Custom-Alphabet)
     [nur falls custom] alphabet_len: 2 Byte + alphabet_chars: alphabet_len Byte
+    text_encoding:    1 Byte  (0 = UTF-8, 1 = UTF-16LE - Encoding der
+                      AUSGABEDATEI selbst, siehe utf16le128/utf16le256 in
+                      alphabets.py. decode.py ermittelt dies bereits vorab
+                      per Byte-Sniffing der Rohdaten - dieses Feld dient nur
+                      als zusaetzlicher Cross-Check, siehe decode.py)
     document_id:      8 Byte  (zufaellig, von encode.py erzeugt - identisch auf
                       allen Seiten EINES Encode-Laufs, siehe Seitenteilung unten)
     page_count:       2 Byte (uint16, big-endian) - Gesamtzahl Seiten
@@ -43,8 +48,10 @@ Seitenteilung (encode.py --lines):
 import struct
 from alphabets import Alphabet, HEADER_ALPHABET
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 DOCUMENT_ID_WIDTH = 8  # Byte, siehe pack_header
+TEXT_ENCODING_UTF8 = 0
+TEXT_ENCODING_UTF16LE = 1
 PREAMBLE_N_WIDTH = 4       # Symbole fuer die Header-Zeilenanzahl N
 PREAMBLE_CHECK_WIDTH = 1   # Symbole fuer die Pruefsumme
 HEADER_COPIES = 3
@@ -63,7 +70,7 @@ class HeaderError(ValueError):
 def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r: int,
                  total_file_size: int, sha256_digest: bytes, ln_width: int,
                  filename: str, document_id: bytes, page_count: int, page_number: int,
-                 page_checksum: int) -> bytes:
+                 page_checksum: int, text_encoding: int) -> bytes:
     out = bytearray()
     out.append(FORMAT_VERSION)
     out.append(1 if is_custom_alphabet else 0)
@@ -75,6 +82,9 @@ def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r:
         chars = payload_alphabet.chars.encode("utf-8")
         out.extend(struct.pack(">H", len(chars)))
         out.extend(chars)
+    if text_encoding not in (TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE):
+        raise ValueError(f"text_encoding muss {TEXT_ENCODING_UTF8} oder {TEXT_ENCODING_UTF16LE} sein")
+    out.append(text_encoding)
     if len(document_id) != DOCUMENT_ID_WIDTH:
         raise ValueError(f"document_id muss {DOCUMENT_ID_WIDTH} Byte lang sein")
     out.extend(document_id)
@@ -116,6 +126,7 @@ def unpack_header(data: bytes) -> dict:
     if is_custom:
         alen = struct.unpack(">H", take(2))[0]
         alphabet_chars = take(alen).decode("utf-8")
+    text_encoding = take(1)[0]
     document_id = take(DOCUMENT_ID_WIDTH)
     page_count = struct.unpack(">H", take(2))[0]
     page_number = struct.unpack(">H", take(2))[0]
@@ -130,6 +141,7 @@ def unpack_header(data: bytes) -> dict:
 
     return dict(
         version=version, is_custom_alphabet=is_custom, alphabet_chars=alphabet_chars,
+        text_encoding=text_encoding,
         document_id=document_id, page_count=page_count, page_number=page_number,
         page_checksum=page_checksum,
         k=k, r=r, total_file_size=total_file_size, sha256=sha256_digest,
@@ -240,7 +252,7 @@ def parse_header_lines(preamble_line: str, body_lines, line_width: int, header_a
     by_line_idx = {i: [] for i in range(n)}
     for raw in body_lines[:expected_total]:
         try:
-            symbols = header_alpha.text_to_symbols(raw)
+            symbols = header_alpha.text_to_symbols(raw.strip())
         except ValueError:
             continue  # unlesbare Zeile: einfach ignorieren, zaehlt als fehlende Kopie
         if len(symbols) < HEADER_COPY_IDX_WIDTH + HEADER_LINE_IDX_WIDTH:

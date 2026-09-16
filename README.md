@@ -28,7 +28,7 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `input` | Eingabedatei (optional, sonst stdin) |
 | `-o/--output` | Ausgabedatei (optional, sonst stdout) |
 | `--width` | Gesamte Zeilenbreite **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100) |
-| `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128). Schließt `--alphabet` aus |
+| `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128), `utf16le128`/`utf16le256` (siehe "UTF-16LE-Presets" unten). Schließt `--alphabet` aus |
 | `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
 | `--parity-symbols` | Absolute Paritätssymbolzahl r, statt `--redundancy` |
@@ -70,6 +70,27 @@ führen zum Abbruch (kein automatisches Aufteilen auf mehrere Dokumente).
   fehlerhaften Zeile), `<output>.part2` (Rest, inkl. nicht rekonstruierbarer
   Stellen als Nullbytes), `<output>.errors.txt`/`.json` (alle fehlerhaften
   Zeilen mit Grund). SHA-256-Prüfung wird in diesem Fall übersprungen.
+
+**UTF-16LE-Presets:** `latin128`/`utf8128` unterscheiden sich nur in der
+*Zeichenauswahl* — die Ausgabedatei bleibt in jedem Fall UTF-8. `utf16le128`
+(identische 128 Zeichen wie `utf8128`) und `utf16le256` (neues 256-Zeichen-
+Set aus Box-Drawing-/Block-Element-/Geometrie-Symbolen, GF256, ca. 14%
+dichter, NICHT OCR-kuratiert) sind anders: hier schreibt `encode.py` die
+Ausgabedatei selbst als **echtes UTF-16LE** (mit BOM), statt nur andere
+Unicode-Zeichen in einer UTF-8-Datei zu benutzen. Gedacht für den
+Zwischenablage-Transfer, da Windows' natives Zwischenablage-Textformat
+(CF_UNICODETEXT) selbst UTF-16LE ist — vermeidet den UTF-8↔UTF-16-Umweg dort.
+
+`decode.py` erkennt UTF-8 vs. UTF-16LE **pro Quelle automatisch** an den
+Rohbytes, ohne die Datei neu zu öffnen und ohne dass ein BOM zwingend nötig
+wäre (funktioniert auch bei einer aus der Gesamtdatei herausgeschnittenen
+Einzelseite ohne führendes BOM, siehe "Seitenteilung" oben): das Header-
+Alphabet ist immer reines 7-Bit-ASCII, und `0x00` ist in jedem Alphabet
+verboten (siehe `alphabets.py`) — ein UTF-8-Strom kann also nie ein rohes
+`0x00`-Byte enthalten, während ASCII als UTF-16LE immer `Byte, 0x00`-Paare
+erzeugt. Das erkannte Encoding wird zusätzlich gegen ein explizites
+`text_encoding`-Feld im Header jeder Seite geprüft; bei Widerspruch wird nur
+diese eine Seite übersprungen (wie bei jedem anderen Seiten-Header-Fehler).
 
 **Zwischenablage statt OCR:** Bei sehr großen Dateien reicht ein einzelner
 Copy/Paste-Vorgang oft nicht aus, sodass mehrere Teilstücke nacheinander
