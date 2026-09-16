@@ -26,7 +26,7 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | Parameter | Bedeutung |
 |---|---|
 | `input` | Eingabedatei (optional, sonst stdin) |
-| `-o/--output` | Ausgabedatei (optional, sonst stdout) |
+| `-o/--output` | Ausgabedatei (optional, sonst stdout). Enthält ein `*`, siehe "Seitenteilung" unten |
 | `--width` | Gesamte Zeilenbreite **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100) |
 | `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128), `utf16le128`/`utf16le256` (siehe "UTF-16LE-Presets" unten). Schließt `--alphabet` aus |
 | `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
@@ -48,9 +48,22 @@ N Zeilen auf. Jede Seite trägt eine **vollständige eigene Kopie** des
 Headers (inkl. 3-fach wiederholter Praeambel) plus vier zusätzliche Felder:
 Gesamtzahl der Seiten, Nummer dieser Seite, eine CRC32-Prüfsumme dieser
 Seite sowie eine zufällige, für alle Seiten einer Datei gemeinsame
-Dokument-ID. Seiten werden im selben Textstrom hintereinander ausgegeben,
-getrennt durch 3 Leerzeilen; Zeilennummern in den Nutzdatenzeilen bleiben
-dabei global über die ganze Datei (unverändert durch die Seitenteilung).
+Dokument-ID. Zeilennummern in den Nutzdatenzeilen bleiben dabei global über
+die ganze Datei (unverändert durch die Seitenteilung).
+
+Ohne `*` im `-o`-Dateinamen (oder bei Ausgabe nach stdout) werden alle
+Seiten in **einem einzigen Textstrom** hintereinander ausgegeben, getrennt
+durch 3 Leerzeilen — bei den UTF-16LE-Presets (siehe unten) erscheint dabei
+nur **ein** BOM ganz am Anfang des Gesamtstroms, nicht pro Seite.
+
+Enthält der `-o`-Dateiname dagegen ein `*` (z.B. `-o
+my/dir/output*.enc --lines 2000`), schreibt `encode.py` **eine eigene Datei
+pro Seite**: `*` wird durch die 1-basierte Seitennummer ersetzt, mit
+optimaler Nullauffüllung (z.B. `output01.enc`, `output02.enc`, … bei 10-99
+Seiten; `output1.enc` bei nur 1 Seite; `output001.enc` ab 100 Seiten). Jede
+dieser Dateien ist ein eigenständiger, vollständiger Strom und bekommt bei
+den UTF-16LE-Presets **ihr eigenes BOM** — anders als beim einzelnen
+Gesamtstrom oben.
 
 `decode.py` akzeptiert Seiten in drei Formen, beliebig kombinierbar:
 alle Seiten in einer Datei/stdin (auch in **gemischter Reihenfolge**),

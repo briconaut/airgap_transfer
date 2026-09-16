@@ -1,3 +1,4 @@
+import glob
 import os
 import random
 import subprocess
@@ -507,6 +508,95 @@ def test_utf16le_pagination_separate_files():
     print(" OK: UTF-16LE-Einzelseiten ohne BOM korrekt erkannt und zusammengesetzt")
 
 
+def test_output_pattern_split():
+    print("== Test 15: -o mit '*'-Platzhalter (encode.py schreibt eine Datei pro Seite) ==")
+    src = f"{WORKDIR}/t15_src.bin"
+    out = f"{WORKDIR}/t15_out"
+    pattern = f"{WORKDIR}/t15_page*.enc"
+    make_test_file(src, 25_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", pattern, "--width", "80", "--redundancy", "20", "--lines", "10"])
+    assert r.returncode == 0, r.stderr
+    print(" encode stderr:", r.stderr.strip())
+
+    files = sorted(glob.glob(f"{WORKDIR}/t15_page*.enc"))
+    # page_count laesst sich aus der encode-stderr-Ausgabe ablesen ("N Seiten")
+    page_count = int(r.stderr.split("Seitenteilung:")[1].split(" Seiten")[0].strip())
+    assert len(files) == page_count, f"{len(files)} Dateien statt {page_count} erzeugt"
+    expected_width = len(str(page_count))
+    for i, path in enumerate(files, start=1):
+        suffix = os.path.basename(path)[len("t15_page"):-len(".enc")]
+        assert suffix == str(i).zfill(expected_width), f"Nummerierung falsch: {suffix!r} (erwartet Breite {expected_width})"
+
+    r2 = run([sys.executable, DECODE, pattern, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(f" OK: {page_count} Dateien mit optimaler Nullauffuellung erzeugt und korrekt zusammengesetzt")
+
+
+def test_output_pattern_split_utf16le_boms():
+    print("== Test 16: -o mit '*' + utf16le128 - jede Datei hat ihr eigenes BOM ==")
+    src = f"{WORKDIR}/t16_src.bin"
+    out = f"{WORKDIR}/t16_out"
+    pattern = f"{WORKDIR}/t16_page*.enc"
+    make_test_file(src, 20_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", pattern, "--width", "80", "--redundancy", "20",
+             "--lines", "15", "--preset", "utf16le128"])
+    assert r.returncode == 0, r.stderr
+
+    files = sorted(glob.glob(f"{WORKDIR}/t16_page*.enc"))
+    assert len(files) >= 2, f"Testdatei erzeugt zu wenige Seiten ({len(files)}) fuer diesen Test"
+    for path in files:
+        with open(path, "rb") as f:
+            bom = f.read(2)
+        assert bom == b"\xff\xfe", f"{path} hat kein eigenes BOM ({bom!r})"
+
+    r2 = run([sys.executable, DECODE, pattern, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(f" OK: alle {len(files)} Dateien haben ein eigenes BOM, Roundtrip exakt")
+
+
+def test_output_pattern_single_bom_without_star():
+    print("== Test 17: --lines ohne '*' in -o -> weiterhin nur EIN BOM im Gesamtstrom ==")
+    src = f"{WORKDIR}/t17_src.bin"
+    enc = f"{WORKDIR}/t17_enc.txt"
+    out = f"{WORKDIR}/t17_out"
+    make_test_file(src, 20_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20",
+             "--lines", "15", "--preset", "utf16le128"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc, "rb") as f:
+        raw = f.read()
+    assert raw[:2] == b"\xff\xfe", "Gesamtstrom hat kein fuehrendes BOM"
+    bom_occurrences = raw[2:].decode("utf-16-le").count(chr(0xFEFF))
+    assert bom_occurrences == 0, f"{bom_occurrences} zusaetzliche(s) BOM(s) mitten im Gesamtstrom gefunden"
+
+    r2 = run([sys.executable, DECODE, enc, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: genau ein BOM im Gesamtstrom, Roundtrip exakt")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
@@ -522,4 +612,7 @@ if __name__ == "__main__":
     test_preset_utf16le128()
     test_preset_utf16le256()
     test_utf16le_pagination_separate_files()
+    test_output_pattern_split()
+    test_output_pattern_split_utf16le_boms()
+    test_output_pattern_single_bom_without_star()
     print("\nAlle End-to-End-Tests bestanden.")

@@ -30,7 +30,16 @@ from progress import ProgressBar
 def main():
     ap = argparse.ArgumentParser(description="Air-Gap Text-Encoder mit Reed-Solomon-Fehlerkorrektur")
     ap.add_argument("input", nargs="?", help="Eingabedatei (Default: stdin)")
-    ap.add_argument("-o", "--output", help="Ausgabedatei (Default: stdout)")
+    ap.add_argument(
+        "-o", "--output",
+        help=(
+            "Ausgabedatei (Default: stdout). Enthaelt der Dateiname ein '*', wird es "
+            "als Platzhalter fuer eine (optimal, ohne unnoetige Stellen) mit Nullen "
+            "aufgefuellte Seitennummer (1-basiert) verwendet und pro Seite eine eigene "
+            "Datei geschrieben (mit --lines i.d.R. mehrere, sonst genau eine), statt "
+            "einem einzigen Textstrom mit allen Seiten hintereinander."
+        ),
+    )
     ap.add_argument("--width", type=int, default=100, help="Gesamte Zeilenbreite inkl. aller Felder (Default: 100)")
     alpha_group = ap.add_mutually_exclusive_group()
     alpha_group.add_argument(
@@ -66,8 +75,9 @@ def main():
         help=(
             "Nutzdatenzeilen pro Seite. Jede Seite bekommt ihren eigenen, vollstaendigen "
             "Header (inkl. Praeambel, 3-fach wiederholt) sowie Seitenzahl/-nummer, eine "
-            "Pruefsumme dieser Seite und eine gemeinsame Dokument-ID. Seiten werden im "
-            "selben Textstrom hintereinander ausgegeben, getrennt durch 3 Leerzeilen. "
+            "Pruefsumme dieser Seite und eine gemeinsame Dokument-ID. Ohne '*' im "
+            "Dateinamen (siehe -o/--output) werden alle Seiten im selben Textstrom "
+            "hintereinander ausgegeben, getrennt durch 3 Leerzeilen. "
             "Default: keine Seitenteilung (eine einzige Seite fuer die gesamte Datei)."
         ),
     )
@@ -173,25 +183,43 @@ def main():
     # decode.py braucht das BOM nicht zwingend (Byte-Sniffing reicht, siehe
     # dort), es ist reine Konvention fuer andere Werkzeuge (Notepad etc.).
     out_encoding = "utf-16-le" if is_utf16le else "utf-8"
-    if args.output:
-        out = open(args.output, "w", encoding=out_encoding, newline="\n")
-    else:
-        sys.stdout.reconfigure(encoding=out_encoding, newline="\n")
-        out = sys.stdout
-    try:
-        if is_utf16le:
+
+    def write_page(out, preamble, header_lines, page_payload_lines, write_bom):
+        if write_bom:
             out.write(chr(0xFEFF))  # BOM; chr() statt Literal, um jedes Transkriptionsrisiko auszuschliessen
+        out.write(preamble + "\n")
+        for line in header_lines:
+            out.write(line + "\n")
+        for line in page_payload_lines:
+            out.write(line + "\n")
+
+    if args.output and "*" in args.output:
+        # Pro Seite eine eigene Datei ('*' -> 1-basierte, optimal Null-
+        # aufgefuellte Seitennummer). Jede Datei ist ein eigenstaendiger
+        # Strom -> bekommt (falls utf16le) IHR EIGENES BOM; keine
+        # Leerzeilen-Trenner noetig (die Dateien sind schon physisch getrennt).
+        width = len(str(page_count))
         for page_number, (preamble, header_lines, page_payload_lines) in enumerate(pages):
-            out.write(preamble + "\n")
-            for line in header_lines:
-                out.write(line + "\n")
-            for line in page_payload_lines:
-                out.write(line + "\n")
-            if page_number < page_count - 1:
-                out.write("\n\n\n")  # 3 Leerzeilen als Seitentrenner, vom Decoder ignoriert
-    finally:
+            path = args.output.replace("*", str(page_number + 1).zfill(width))
+            with open(path, "w", encoding=out_encoding, newline="\n") as out:
+                write_page(out, preamble, header_lines, page_payload_lines, write_bom=is_utf16le)
+        print(f"Ausgabe: {page_count} Datei(en), Muster {args.output!r}.", file=sys.stderr)
+    else:
+        # Ein einziger Textstrom (Datei oder stdout) mit allen Seiten
+        # hintereinander -> genau EIN BOM ganz am Anfang, nicht pro Seite.
         if args.output:
-            out.close()
+            out = open(args.output, "w", encoding=out_encoding, newline="\n")
+        else:
+            sys.stdout.reconfigure(encoding=out_encoding, newline="\n")
+            out = sys.stdout
+        try:
+            for page_number, (preamble, header_lines, page_payload_lines) in enumerate(pages):
+                write_page(out, preamble, header_lines, page_payload_lines, write_bom=(is_utf16le and page_number == 0))
+                if page_number < page_count - 1:
+                    out.write("\n\n\n")  # 3 Leerzeilen als Seitentrenner, vom Decoder ignoriert
+        finally:
+            if args.output:
+                out.close()
 
 
 if __name__ == "__main__":
