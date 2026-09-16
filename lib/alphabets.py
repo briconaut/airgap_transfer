@@ -72,10 +72,34 @@ PRESET_LATIN128 = (
 )
 assert len(PRESET_LATIN128) == 128 and len(set(PRESET_LATIN128)) == 128
 
+# utf8128: dieselben 94 druckbaren 7-Bit-ASCII-Zeichen wie latin128, aber die
+# 34 zusaetzlichen Zeichen kommen aus Latin Extended-A (U+0100-U+017F) statt
+# aus Latin-1 - mittel-/osteuropaeische Diakritika (Tschechisch, Polnisch,
+# Slowakisch, Baltisch, Ungarisch, Tuerkisch, Kroatisch) statt west-
+# europaeischer. Gleiche Auswahlkriterien wie latin128: 17 Gross-/Klein-
+# Paare, gut OCR-erkennbar, keine zu grosse Aehnlichkeit zu ASCII-Basis-
+# zeichen oder zueinander.
+# Ausgeschlossen: tuerkisches Ii/İı (klassische OCR-Verwechslung mit I/i/l),
+# Ligatur Ĳĳ, selten unterstuetztes Ŀŀ (Punkt-L), seltenes Ŋŋ (Eng).
+# Nutzt GF(128), 7 Bit/Symbol - wie latin128 ca. 17% mehr Nutzdaten pro Zeile
+# als 64er-Presets. Voraussetzung: Terminal und OCR unterstuetzen UTF-8.
+PRESET_UTF8128 = (
+    PRESET_LATIN128[:94]  # dieselben 94 druckbaren 7-Bit-ASCII-Zeichen
+    +
+    # 17 Grossbuchstaben mit Latin-Extended-A-Diakritikum
+    "ĀĄĆČĎĐĒĘĚĞ"  # Ā Ą Ć Č Ď Đ Ē Ę Ě Ğ
+    "ĮŁŃŇŐŘŠ"                     # Į Ł Ń Ň Ő Ř Š
+    # dieselben 17 als Kleinbuchstaben
+    "āąćčďđēęěğ"  # ā ą ć č ď đ ē ę ě ğ
+    "įłńňőřš"                     # į ł ń ň ő ř š
+)
+assert len(PRESET_UTF8128) == 128 and len(set(PRESET_UTF8128)) == 128
+
 PRESETS = {
     "default":   DEFAULT_ALPHABET,
     "ascii64":   PRESET_ASCII64,
     "latin128":  PRESET_LATIN128,
+    "utf8128":   PRESET_UTF8128,
 }
 
 PRESET_NAMES = list(PRESETS)

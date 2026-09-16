@@ -39,7 +39,10 @@ def main():
             "'ascii64': 64 Zeichen, alle Buchstaben+Ziffern inkl. bisher ausgeschlossener "
             "Verwechslungspaare, reines 7-Bit-ASCII (GF64, gleiche Dichte wie 'default'). "
             "'latin128': 128 Zeichen, alle druckbaren 7-Bit-ASCII + 34 Latin-1-Zeichen "
-            "(GF128, ca. 17%% mehr Nutzdaten/Zeile). Erfordert UTF-8-Terminal und OCR."
+            "(GF128, ca. 17%% mehr Nutzdaten/Zeile). Erfordert UTF-8-Terminal und OCR. "
+            "'utf8128': wie 'latin128', aber die 34 zusaetzlichen Zeichen kommen aus "
+            "Latin Extended-A (mittel-/osteuropaeische Diakritika) statt Latin-1 "
+            "(GF128, gleiche Dichte wie 'latin128'). Erfordert UTF-8-Terminal und OCR."
         ),
     )
     alpha_group.add_argument(

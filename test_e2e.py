@@ -174,9 +174,32 @@ def test_custom_alphabet():
     print(" OK: Custom-Alphabet Roundtrip exakt")
 
 
+def test_preset_utf8128():
+    print("== Test 5: eingebautes Preset 'utf8128' ==")
+    src = f"{WORKDIR}/t5_src.bin"
+    enc = f"{WORKDIR}/t5_enc.txt"
+    out = f"{WORKDIR}/t5_out"
+    make_test_file(src, 8_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "150", "--preset", "utf8128"])
+    assert r.returncode == 0, r.stderr
+    print(" encode stderr:", r.stderr.strip().splitlines()[-1])
+
+    r2 = run([sys.executable, DECODE, enc, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: 'utf8128'-Preset-Roundtrip exakt")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
     test_lost_lines()
     test_custom_alphabet()
+    test_preset_utf8128()
     print("\nAlle End-to-End-Tests bestanden.")

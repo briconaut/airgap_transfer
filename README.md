@@ -27,7 +27,8 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `input` | Eingabedatei (optional, sonst stdin) |
 | `-o/--output` | Ausgabedatei (optional, sonst stdout) |
 | `--width` | Gesamte Zeilenbreite **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100) |
-| `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256 sein). Default: eingebautes 64er-Preset |
+| `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128). Schließt `--alphabet` aus |
+| `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
 | `--parity-symbols` | Absolute Paritätssymbolzahl r, statt `--redundancy` |
 | `--filename` | Im Header gespeicherter Name (Default: Basisname der Eingabedatei) |
