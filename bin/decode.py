@@ -94,6 +94,13 @@ def main():
     results = {}  # line_number -> parse_payload_line()-Ergebnis
     parse_errors = []  # Zeilen, die sich nicht mal als Payload-Zeile lesen liessen (keine line_number)
 
+    # Monotonie-Pruefung: Zeilennummern muessen streng steigen.
+    # Taucht eine Nummer m <= zuletzt gesehener Nummer n auf, wird sie
+    # stillschweigend verworfen. Das behebt Artefakte beim Zusammenfuegen
+    # mehrerer Screenshots (Stitching), bei denen ueberlappende Randbereiche
+    # zu wiederholten oder rueckwaerts laufenden Zeilennummern fuehren.
+    max_seen_ln = -1
+
     for raw in rest_lines:
         res = parse_payload_line(raw, k, r, gen, gf, ln_width, crc_width, payload_alpha, header_alpha)
         if res is None:
@@ -102,6 +109,9 @@ def main():
         if ln is None:
             parse_errors.append(res)
             continue
+        if ln <= max_seen_ln:
+            continue  # Stitching-Artefakt: stillschweigend verwerfen
+        max_seen_ln = ln
         # bei Duplikaten: 'ok' hat Vorrang vor allem anderen
         if ln not in results or (results[ln]["status"] != LineStatus.OK and res["status"] == LineStatus.OK):
             results[ln] = res
