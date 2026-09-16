@@ -29,7 +29,7 @@ from header import (
     HeaderError, parse_preamble, parse_header_lines, unpack_header, HEADER_COPIES,
 )
 from rs_codec import GaloisField, rs_generator_poly
-from framing import parse_payload_line, crc_width_for, LineStatus
+from framing import parse_payload_line, crc_width_for, reflow_joined_lines, LineStatus
 
 
 def main():
@@ -80,6 +80,22 @@ def main():
     gen = rs_generator_poly(meta["r"], gf)
     crc_width = crc_width_for(header_alpha)
     k, r, ln_width = meta["k"], meta["r"], meta["ln_width"]
+
+    # Clipboard-Transfer (statt OCR) bei grossen Dateien braucht mehrere
+    # Copy/Paste-Vorgaenge; an der Nahtstelle geht dabei gelegentlich ein
+    # Zeilenumbruch verloren, wodurch zwei oder mehr Nutzdatenzeilen zu einer
+    # Roh-Zeile verschmelzen. Da jede Nutzdatenzeile eine bekannte, feste
+    # Laenge hat, laesst sich das erkennen und automatisch rueckgaengig machen.
+    payload_line_width = ln_width + crc_width + k + r
+    rest_lines, n_rejoined = reflow_joined_lines(rest_lines, payload_line_width)
+    if n_rejoined:
+        print(
+            f"Hinweis: {n_rejoined} Roh-Zeile(n) enthielten offenbar mehrere zusammengefuegte "
+            f"Nutzdatenzeilen (Zeilenumbruch-Verlust, z.B. Zwischenablage-Artefakt) und wurden "
+            f"anhand der bekannten Zeilenbreite ({payload_line_width} Symbole) automatisch wieder "
+            f"aufgeteilt.",
+            file=sys.stderr,
+        )
 
     # total_lines aus dem Header ableiten — ausser bei total_file_size==0
     # (gesetzt von reframe.py, das die Originallaenge nicht kennt). In diesem

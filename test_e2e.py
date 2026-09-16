@@ -196,10 +196,57 @@ def test_preset_utf8128():
     print(" OK: 'utf8128'-Preset-Roundtrip exakt")
 
 
+def test_joined_lines():
+    print("== Test 6: zusammengefuegte Zeilen (simuliert Zwischenablage-Artefakt) ==")
+    src = f"{WORKDIR}/t6_src.bin"
+    enc = f"{WORKDIR}/t6_enc.txt"
+    joined = f"{WORKDIR}/t6_joined.txt"
+    out = f"{WORKDIR}/t6_out"
+    make_test_file(src, 15_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    non_empty = [i for i, l in enumerate(lines) if l.strip()]
+    assert len(non_empty) > 30, "Testdatei erzeugt zu wenige Zeilen fuer diesen Test"
+
+    # zwei Nutzdatenzeilen ohne Trennzeichen verschmelzen (simuliert verlorenen
+    # Zeilenumbruch an einer Copy/Paste-Nahtstelle) ...
+    p1 = non_empty[-5]
+    lines[p1] = lines[p1] + lines[p1 + 1]
+    del lines[p1 + 1]
+
+    # ... und an einer zweiten, unabhaengigen Stelle gleich drei Zeilen (weiter
+    # vorne verarbeitet, damit sich die Indizes nicht mit p1 ueberschneiden).
+    p2 = non_empty[-15]
+    lines[p2] = lines[p2] + lines[p2 + 1] + lines[p2 + 2]
+    del lines[p2 + 2]
+    del lines[p2 + 1]
+
+    with open(joined, "w") as f:
+        f.write("\n".join(lines))
+
+    r2 = run([sys.executable, DECODE, joined, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+    assert "zusammengefuegte" in r2.stderr, "Kein Hinweis auf erkannte zusammengefuegte Zeilen im stderr"
+    assert not os.path.exists(f"{out}.part1"), "Datei sollte trotz Verschmelzung vollstaendig rekonstruiert werden"
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual, "Nach Wiederaufteilung stimmt die Datei nicht ueberein!"
+    print(" OK: trotz zusammengefuegter Zeilen exakt rekonstruiert")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
     test_lost_lines()
     test_custom_alphabet()
     test_preset_utf8128()
+    test_joined_lines()
     print("\nAlle End-to-End-Tests bestanden.")

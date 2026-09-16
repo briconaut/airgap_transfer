@@ -1,8 +1,9 @@
 # Air-Gap Text-Encoder/-Decoder
 
 Encoder/Decoder-Paar zum Transport einer Datei über einen rein optischen
-Kanal (Linux-Text-Terminal → Screenshot → OCR), ohne USB/Netzwerk.
-Reines Python 3.10, **keine Zusatzpakete** (nur Standardbibliothek).
+Kanal (Linux-Text-Terminal → Screenshot → OCR) oder per Copy/Paste über die
+Windows-Zwischenablage, ohne USB/Netzwerk. Reines Python 3.10,
+**keine Zusatzpakete** (nur Standardbibliothek).
 
 Screenshot-Erstellung, OCR und Seitenaufteilung/Paging sind **nicht** Teil
 dieses Tools — beide Programme sind reine Text-in/Text-out-Filter und lassen
@@ -48,6 +49,17 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
   fehlerhaften Zeile), `<output>.part2` (Rest, inkl. nicht rekonstruierbarer
   Stellen als Nullbytes), `<output>.errors.txt`/`.json` (alle fehlerhaften
   Zeilen mit Grund). SHA-256-Prüfung wird in diesem Fall übersprungen.
+
+**Zwischenablage statt OCR:** Bei sehr großen Dateien reicht ein einzelner
+Copy/Paste-Vorgang oft nicht aus, sodass mehrere Teilstücke nacheinander
+eingefügt werden müssen. Geht dabei an einer Nahtstelle der Zeilenumbruch
+verloren, verschmelzen zwei (oder mehr) Nutzdatenzeilen zu einer Roh-Zeile.
+`decode.py` erkennt das automatisch (jede Nutzdatenzeile hat eine bekannte,
+feste Länge) und teilt betroffene Roh-Zeilen vor der Weiterverarbeitung
+wieder auf — ein Hinweis dazu erscheint auf stderr. Das deckt nur den
+Nutzdatenbereich ab; verschmilzt ausgerechnet die (sehr kurze) Präambel/
+Header-Zeile mit einer Nachbarzeile, gilt weiterhin das bestehende
+Restrisiko für den Header-Bereich (siehe unten).
 
 ## Wichtiger Fakt zur Fehlerkorrektur
 

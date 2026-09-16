@@ -159,6 +159,43 @@ def parse_payload_line(raw: str, k: int, r: int, gen, gf: GaloisField, ln_width:
     return dict(line_number=line_number, status=LineStatus.OK, data=decoded, reason=None)
 
 
+def reflow_joined_lines(lines, expected_width: int):
+    """Manche Uebertragungswege (z.B. Windows-Zwischenablage bei grossen Dateien,
+    die mehrere Copy/Paste-Vorgaenge brauchen) verlieren gelegentlich den
+    Zeilenumbruch an der Nahtstelle zwischen zwei Einfuegungen - dadurch
+    verschmelzen zwei oder mehr Nutzdatenzeilen zu einer Roh-Zeile.
+
+    Jede echte Nutzdatenzeile ist exakt `expected_width` Symbole lang (siehe
+    build_payload_line). Eine Roh-Zeile, die laenger als `expected_width` ist,
+    wird deshalb in Stuecke dieser Laenge zerlegt; ein nicht glatt teilbarer
+    Rest wird als eigene (dann zu kurze) Zeile angehaengt statt verworfen.
+    Jedes Stueck traegt seine eigene Zeilennummer im Praefix, daher ist die
+    Reihenfolge der Stuecke fuer die weitere Verarbeitung irrelevant - ein
+    falsch geratener Trennpunkt fuehrt hoechstens zu einer zusaetzlichen
+    Kandidatenzeile, die an CRC/Reed-Solomon scheitert und verworfen wird
+    (siehe LineStatus.UNCORRECTABLE / CORRECTED_SUSPECT), nie zu verlorenen
+    echten Zeilen.
+
+    Rueckgabe: (neue Zeilenliste, Anzahl der Roh-Zeilen, die aufgeteilt wurden).
+    """
+    if expected_width <= 0:
+        return lines, 0
+    out = []
+    n_split = 0
+    for raw in lines:
+        s = raw.strip()
+        if len(s) > expected_width:
+            n = len(s) // expected_width
+            out.extend(s[i * expected_width:(i + 1) * expected_width] for i in range(n))
+            rest = s[n * expected_width:]
+            if rest:
+                out.append(rest)
+            n_split += 1
+        else:
+            out.append(raw)
+    return out, n_split
+
+
 def _int_to_digits(value: int, width: int, base: int):
     digits = []
     v = value
