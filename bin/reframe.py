@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import os
 import sys
+import zlib
 
 # lib/ relativ zu diesem Skript einbinden, unabhaengig vom Aufrufverzeichnis
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -183,6 +184,11 @@ def main():
         sha256_digest=sha256_digest,
         ln_width=layout["ln_width"],
         filename=args.filename,
+        # reframe.py kennt keine Seitenteilung (nicht Teil dieses Tools) -
+        # degenerierter Einzelseiten-Fall, gleicher Code-Pfad wie encode.py
+        # ohne --lines.
+        document_id=os.urandom(8), page_count=1, page_number=0,
+        page_checksum=zlib.crc32(data) & 0xFFFFFFFF,
     )
     preamble, header_lines = build_header_lines(header_bytes, args.width, header_alpha)
 

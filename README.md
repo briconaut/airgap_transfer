@@ -32,15 +32,36 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
 | `--parity-symbols` | Absolute Paritätssymbolzahl r, statt `--redundancy` |
+| `--lines` | Nutzdatenzeilen pro Seite (siehe "Seitenteilung" unten). Default: keine Seitenteilung |
 | `--filename` | Im Header gespeicherter Name (Default: Basisname der Eingabedatei) |
 
 ### decode.py
 
 | Parameter | Bedeutung |
 |---|---|
-| `input` | OCR-Textdatei (optional, sonst stdin) |
+| `input` | OCR-Text-/Seiten-Datei(en) (optional, sonst stdin). Mehrere Dateien und/oder Glob-Patterns (z.B. `"seite_*.txt"`) sind erlaubt |
 | `-o/--output` | Basisname der Ausgabe (Default `output`) |
 | `--error-report-format` | `text` (Default) oder `json` |
+
+**Seitenteilung:** `encode.py --lines N` teilt die Nutzdaten in Seiten zu je
+N Zeilen auf. Jede Seite trägt eine **vollständige eigene Kopie** des
+Headers (inkl. 3-fach wiederholter Praeambel) plus vier zusätzliche Felder:
+Gesamtzahl der Seiten, Nummer dieser Seite, eine CRC32-Prüfsumme dieser
+Seite sowie eine zufällige, für alle Seiten einer Datei gemeinsame
+Dokument-ID. Seiten werden im selben Textstrom hintereinander ausgegeben,
+getrennt durch 3 Leerzeilen; Zeilennummern in den Nutzdatenzeilen bleiben
+dabei global über die ganze Datei (unverändert durch die Seitenteilung).
+
+`decode.py` akzeptiert Seiten in drei Formen, beliebig kombinierbar:
+alle Seiten in einer Datei/stdin (auch in **gemischter Reihenfolge**),
+mehrere einzelne Dateien als separate Argumente, oder ein Glob-Pattern
+(z.B. `python3 decode.py "seite_*.txt" -o wiederhergestellt`). Der Header
+je Seite ist wie die Präambel nicht redundant über mehrere Seiten
+abgesichert: ist der Header einer einzelnen Seite nicht lesbar, wird nur
+diese Seite übersprungen (ihre Zeilen zählen als fehlend) — erst wenn
+**keine einzige** Seite einen lesbaren Header liefert, bricht der Decoder
+komplett ab. Seiten mit unterschiedlichen Dokument-IDs im selben Aufruf
+führen zum Abbruch (kein automatisches Aufteilen auf mehrere Dokumente).
 
 **Ausgabe:**
 - Alles fehlerfrei rekonstruierbar → eine Datei `<output>`, SHA-256 gegen den
@@ -73,10 +94,13 @@ verworfen (nie stillschweigend falsch decodiert — das ist getestet, siehe
 ## Format (Kurzfassung)
 
 ```
-Zeile 1:         Präambel (5 Zeichen, Header-Alphabet): Anzahl Header-Zeilen + Prüfsumme
-Zeilen 2..N:      Header, 3-fach wiederholt, je mit [Kopie-Idx][Zeilen-Idx][Inhalt]
-                  (Formatversion, Alphabet, k, r, Dateigröße, SHA-256, Dateiname, ...)
-Zeilen N+1..Ende: Nutzdaten, je [Zeilennummer][CRC32][RS-Codewort(k Daten + r Parität)]
+Je Seite (mindestens 1 - ohne --lines besteht die ganze Datei aus einer Seite):
+  Zeile 1:         Präambel (5 Zeichen, Header-Alphabet): Anzahl Header-Zeilen + Prüfsumme
+  Zeilen 2..N:      Header, 3-fach wiederholt, je mit [Kopie-Idx][Zeilen-Idx][Inhalt]
+                    (Formatversion, Alphabet, Dokument-ID, Seitenzahl/-nummer/-prüfsumme,
+                    k, r, Dateigröße, SHA-256, Dateiname, ...)
+  Zeilen N+1..Ende: Nutzdaten dieser Seite, je [Zeilennummer][CRC32][RS-Codewort(k+r)]
+(3 Leerzeilen zwischen den Seiten, Zeilennummern global über die ganze Datei)
 ```
 
 Header- und Zeilennummer-/CRC-Felder stehen **immer** im festen 64-Symbol-
@@ -88,8 +112,9 @@ Diese Punkte wurden im Entwurfsprozess bewusst so entschieden (Kompromiss
 Einfachheit/Risiko) und sind keine Bugs:
 
 - **Präambel** ist nicht 3-fach abgesichert (nur 1 Prüfsymbol zur reinen
-  Erkennung). Geht die allererste Zeile der Datei komplett verloren, ist die
-  Datei nicht mehr lesbar.
+  Erkennung). Geht die Präambel-Zeile einer Seite komplett verloren, ist
+  diese eine Seite nicht mehr lesbar (ihre Zeilen zählen als fehlend) - bei
+  Seitenteilung betrifft das nur diese eine Seite, nicht die ganze Datei.
 - **Zeilennummer** selbst ist nicht durch das CRC geschützt (CRC deckt nur
   die Nutzdaten ab). Ein OCR-Fehler ausgerechnet in der Zeilennummer könnte
   eine Zeile theoretisch an die falsche Position einsortieren, statt als

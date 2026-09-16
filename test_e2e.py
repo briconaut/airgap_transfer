@@ -6,7 +6,8 @@ import hashlib
 
 # lib/ fuer den direkten Import (Alphabet wird in den Hilfsfunktionen benutzt)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-from alphabets import DEFAULT_ALPHABET
+from alphabets import Alphabet, DEFAULT_ALPHABET
+from header import find_preamble_positions
 
 # Pfade zu den Tools relativ zu diesem Skript
 ENCODE  = os.path.join(os.path.dirname(__file__), "bin", "encode.py")
@@ -26,6 +27,19 @@ def run(cmd):
 def make_test_file(path, size):
     with open(path, "wb") as f:
         f.write(bytes(random.getrandbits(8) for _ in range(size)))
+
+
+def split_pages(lines):
+    """Zerlegt eine Zeilenliste (encode.py --lines-Output) an den Seiten-
+    Praeambeln in ihre einzelnen Seiten (jede Seite: Liste von Zeilen,
+    beginnend mit ihrer eigenen Praeambel)."""
+    header_alpha = Alphabet(DEFAULT_ALPHABET)
+    positions = find_preamble_positions(lines, header_alpha)
+    pages = []
+    for i, start in enumerate(positions):
+        end = positions[i + 1] if i + 1 < len(positions) else len(lines)
+        pages.append(lines[start:end])
+    return pages
 
 
 def test_clean_roundtrip():
@@ -242,6 +256,163 @@ def test_joined_lines():
     print(" OK: trotz zusammengefuegter Zeilen exakt rekonstruiert")
 
 
+def test_pagination_basic():
+    print("== Test 7: Seitenteilung (--lines), normaler Roundtrip ==")
+    src = f"{WORKDIR}/t7_src.bin"
+    enc = f"{WORKDIR}/t7_enc.txt"
+    out = f"{WORKDIR}/t7_out"
+    make_test_file(src, 30_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20", "--lines", "20"])
+    assert r.returncode == 0, r.stderr
+    print(" encode stderr:", r.stderr.strip())
+
+    r2 = run([sys.executable, DECODE, enc, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: paginierter Roundtrip exakt")
+
+
+def test_pagination_shuffled():
+    print("== Test 8: Seiten gemischt in einer Datei ==")
+    src = f"{WORKDIR}/t8_src.bin"
+    enc = f"{WORKDIR}/t8_enc.txt"
+    shuffled = f"{WORKDIR}/t8_shuffled.txt"
+    out = f"{WORKDIR}/t8_out"
+    make_test_file(src, 30_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20", "--lines", "15"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    pages = split_pages(lines)
+    assert len(pages) >= 4, f"Testdatei erzeugt zu wenige Seiten ({len(pages)}) fuer diesen Test"
+    random.shuffle(pages)
+
+    with open(shuffled, "w") as f:
+        for i, page in enumerate(pages):
+            f.write("\n".join(page) + "\n")
+            if i < len(pages) - 1:
+                f.write("\n\n\n")
+
+    r2 = run([sys.executable, DECODE, shuffled, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: gemischte Seiten korrekt zusammengesetzt")
+
+
+def test_pagination_separate_files():
+    print("== Test 9: Seiten als einzelne Dateien ==")
+    src = f"{WORKDIR}/t9_src.bin"
+    enc = f"{WORKDIR}/t9_enc.txt"
+    out = f"{WORKDIR}/t9_out"
+    make_test_file(src, 25_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20", "--lines", "10"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    pages = split_pages(lines)
+    assert len(pages) >= 3, f"Testdatei erzeugt zu wenige Seiten ({len(pages)}) fuer diesen Test"
+
+    page_paths = []
+    for i, page in enumerate(pages):
+        p = f"{WORKDIR}/t9_page{i}.txt"
+        with open(p, "w") as f:
+            f.write("\n".join(page) + "\n")
+        page_paths.append(p)
+
+    r2 = run([sys.executable, DECODE, *page_paths, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: als Einzeldateien korrekt zusammengesetzt")
+
+
+def test_pagination_pattern():
+    print("== Test 10: Seiten ueber Glob-Pattern ==")
+    src = f"{WORKDIR}/t10_src.bin"
+    enc = f"{WORKDIR}/t10_enc.txt"
+    out = f"{WORKDIR}/t10_out"
+    make_test_file(src, 25_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20", "--lines", "10"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    pages = split_pages(lines)
+    assert len(pages) >= 3, f"Testdatei erzeugt zu wenige Seiten ({len(pages)}) fuer diesen Test"
+
+    for i, page in enumerate(pages):
+        with open(f"{WORKDIR}/t10_page{i:03d}.txt", "w") as f:
+            f.write("\n".join(page) + "\n")
+
+    r2 = run([sys.executable, DECODE, f"{WORKDIR}/t10_page*.txt", "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: ueber Glob-Pattern korrekt zusammengesetzt")
+
+
+def test_pagination_missing_page():
+    print("== Test 11: komplette Seite fehlt ==")
+    src = f"{WORKDIR}/t11_src.bin"
+    enc = f"{WORKDIR}/t11_enc.txt"
+    damaged = f"{WORKDIR}/t11_damaged.txt"
+    out = f"{WORKDIR}/t11_out"
+    make_test_file(src, 25_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20", "--lines", "10"])
+    assert r.returncode == 0, r.stderr
+
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    pages = split_pages(lines)
+    assert len(pages) >= 4, f"Testdatei erzeugt zu wenige Seiten ({len(pages)}) fuer diesen Test"
+    victim = len(pages) // 2  # Seiten sind hier noch unverschuffelt: Index == page_number
+    del pages[victim]
+
+    with open(damaged, "w") as f:
+        for i, page in enumerate(pages):
+            f.write("\n".join(page) + "\n")
+            if i < len(pages) - 1:
+                f.write("\n\n\n")
+
+    r2 = run([sys.executable, DECODE, damaged, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    print(" decode stderr:", r2.stderr.strip())
+
+    with open(f"{out}.errors.txt") as f:
+        report = f.read()
+    assert f"Seite {victim}: komplett fehlend" in report, report
+    print(" OK: fehlende Seite im Fehlerbericht korrekt gemeldet")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
@@ -249,4 +420,9 @@ if __name__ == "__main__":
     test_custom_alphabet()
     test_preset_utf8128()
     test_joined_lines()
+    test_pagination_basic()
+    test_pagination_shuffled()
+    test_pagination_separate_files()
+    test_pagination_pattern()
+    test_pagination_missing_page()
     print("\nAlle End-to-End-Tests bestanden.")

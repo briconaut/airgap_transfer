@@ -18,6 +18,15 @@ def crc_width_for(header_alpha: Alphabet) -> int:
     return math.ceil(CRC_BITS / header_alpha.bits_per_symbol)
 
 
+def byte_offset_of_line(line_no: int, k: int, bits_per_symbol: int) -> int:
+    """Byte-Offset in der Originaldatei, an dem Nutzdatenzeile `line_no`
+    beginnt (Floor-Trick, siehe symbols_to_bytes in alphabets.py). Gemeinsam
+    genutzt von encode.py (Seiten-Pruefsumme) und decode.py (part1/part2-
+    Schnitt + Seiten-Pruefsumme) - beide muessen exakt dieselbe Formel
+    verwenden, sonst passen die CRC32-Pruefsummen nicht zusammen."""
+    return (line_no * k * bits_per_symbol) // 8
+
+
 def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
                     header_alpha: Alphabet, redundancy_pct: float | None, parity_symbols: int | None):
     """Loest iterativ k, r, ln_width aus --width + --redundancy (oder --parity-symbols).

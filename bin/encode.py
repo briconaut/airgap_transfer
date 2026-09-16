@@ -12,8 +12,10 @@ Wichtiger Hinweis zur Fehlerkorrektur (siehe README.md):
 """
 import argparse
 import hashlib
+import math
 import os
 import sys
+import zlib
 
 # lib/ relativ zu diesem Skript einbinden, unabhaengig vom Aufrufverzeichnis
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -21,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from alphabets import Alphabet, DEFAULT_ALPHABET, make_alphabet, PRESET_NAMES
 from header import pack_header, build_header_lines
 from rs_codec import GaloisField, rs_generator_poly, rs_encode
-from framing import compute_layout, build_payload_line, crc_width_for
+from framing import compute_layout, build_payload_line, crc_width_for, byte_offset_of_line
 from progress import ProgressBar
 
 
@@ -51,12 +53,24 @@ def main():
     )
     ap.add_argument("--redundancy", type=float, default=None, help="Paritaet in Prozent von k (Default: 20.0)")
     ap.add_argument("--parity-symbols", type=int, default=None, help="Absolute Anzahl Paritaetssymbole r (statt --redundancy)")
+    ap.add_argument(
+        "--lines", type=int, default=None,
+        help=(
+            "Nutzdatenzeilen pro Seite. Jede Seite bekommt ihren eigenen, vollstaendigen "
+            "Header (inkl. Praeambel, 3-fach wiederholt) sowie Seitenzahl/-nummer, eine "
+            "Pruefsumme dieser Seite und eine gemeinsame Dokument-ID. Seiten werden im "
+            "selben Textstrom hintereinander ausgegeben, getrennt durch 3 Leerzeilen. "
+            "Default: keine Seitenteilung (eine einzige Seite fuer die gesamte Datei)."
+        ),
+    )
     ap.add_argument("--filename", help="Im Header gespeicherter Dateiname (Default: Basisname der Eingabedatei, falls vorhanden)")
     ap.add_argument("--progress", action="store_true", help="Fortschrittsbalken auf stderr anzeigen")
     args = ap.parse_args()
 
     if args.redundancy is not None and args.parity_symbols is not None:
         ap.error("--redundancy und --parity-symbols schliessen sich gegenseitig aus")
+    if args.lines is not None and args.lines < 1:
+        ap.error("--lines muss >= 1 sein")
 
     # --- Eingabe lesen -----------------------------------------------------
     if args.input:
@@ -117,12 +131,31 @@ def main():
         bar.update(i + 1)
     bar.done()
 
-    # --- Header bauen -------------------------------------------------------
+    # --- Seiten aufteilen und Header bauen -----------------------------------
     sha256 = hashlib.sha256(data).digest()
-    header_bytes = pack_header(
-        payload_alpha, is_custom, k, r, len(data), sha256, layout["ln_width"], filename,
-    )
-    preamble, header_lines = build_header_lines(header_bytes, args.width, header_alpha)
+    bits_per_symbol = payload_alpha.bits_per_symbol
+    lines_per_page = args.lines or total_lines
+    page_count = max(1, math.ceil(total_lines / lines_per_page))
+    document_id = os.urandom(8)
+
+    if page_count > 1:
+        print(f"Seitenteilung: {page_count} Seiten zu je bis zu {lines_per_page} Nutzdatenzeilen.", file=sys.stderr)
+
+    pages = []  # (preamble, header_lines, payload_lines_slice)
+    for page_number in range(page_count):
+        start = page_number * lines_per_page
+        end = min(start + lines_per_page, total_lines)
+        byte_start = byte_offset_of_line(start, k, bits_per_symbol)
+        byte_end = min(byte_offset_of_line(end, k, bits_per_symbol), len(data))
+        page_checksum = zlib.crc32(data[byte_start:byte_end]) & 0xFFFFFFFF
+
+        header_bytes = pack_header(
+            payload_alpha, is_custom, k, r, len(data), sha256, layout["ln_width"], filename,
+            document_id=document_id, page_count=page_count, page_number=page_number,
+            page_checksum=page_checksum,
+        )
+        preamble, header_lines = build_header_lines(header_bytes, args.width, header_alpha)
+        pages.append((preamble, header_lines, payload_lines[start:end]))
 
     # --- Ausgabe -------------------------------------------------------------
     if args.output:
@@ -131,11 +164,14 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", newline="\n")
         out = sys.stdout
     try:
-        out.write(preamble + "\n")
-        for line in header_lines:
-            out.write(line + "\n")
-        for line in payload_lines:
-            out.write(line + "\n")
+        for page_number, (preamble, header_lines, page_payload_lines) in enumerate(pages):
+            out.write(preamble + "\n")
+            for line in header_lines:
+                out.write(line + "\n")
+            for line in page_payload_lines:
+                out.write(line + "\n")
+            if page_number < page_count - 1:
+                out.write("\n\n\n")  # 3 Leerzeilen als Seitentrenner, vom Decoder ignoriert
     finally:
         if args.output:
             out.close()

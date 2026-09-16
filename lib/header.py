@@ -13,9 +13,15 @@ Header-Koerper (3x wiederholt, jede Zeile mit Praefix):
     (bis zu 3) Kopien jeder Position, setzt den Header wieder zusammen.
 
 Header-Rohbytes (das, was bit-geslict wird):
-    magic:            1 Byte  (Formatversion, aktuell 1)
+    magic:            1 Byte  (Formatversion, aktuell 2)
     alphabet_mode:    1 Byte  (0 = Standard-Preset, 1 = Custom-Alphabet)
-    [nur falls custom] alphabet_len: 1 Byte + alphabet_chars: alphabet_len Byte
+    [nur falls custom] alphabet_len: 2 Byte + alphabet_chars: alphabet_len Byte
+    document_id:      8 Byte  (zufaellig, von encode.py erzeugt - identisch auf
+                      allen Seiten EINES Encode-Laufs, siehe Seitenteilung unten)
+    page_count:       2 Byte (uint16, big-endian) - Gesamtzahl Seiten
+    page_number:      2 Byte (uint16, big-endian) - Nummer dieser Seite (0-basiert)
+    page_checksum:    4 Byte (uint32, big-endian) - CRC32 ueber den Byte-Bereich
+                      der Originaldatei, der auf dieser Seite steckt
     block_k:          2 Byte (uint16, big-endian)
     block_r:          2 Byte (uint16, big-endian)
     total_file_size:  8 Byte (uint64, big-endian)
@@ -23,11 +29,22 @@ Header-Rohbytes (das, was bit-geslict wird):
     ln_width:         1 Byte  (Symbole fuer das Zeilennummernfeld der Nutzdatenzeilen)
     filename_len:     1 Byte
     filename:         filename_len Byte (UTF-8)
+
+Seitenteilung (encode.py --lines):
+    Jede Seite traegt eine VOLLSTAENDIGE Kopie dieses Headers (inkl. Praeambel
+    und 3-facher Wiederholung, siehe unten) - nur page_number/page_checksum
+    unterscheiden sich zwischen den Seiten einer Datei, alle anderen Felder
+    sind identisch. Zeilennummern in den Nutzdatenzeilen bleiben GLOBAL ueber
+    die gesamte Datei (unveraendert durch die Seitenteilung) - eine Seite ist
+    rein eine Wiederholungs-/Framing-Einheit, keine eigene Adressierung.
+    Ohne --lines: page_count=1, page_number=0, page_checksum ueber die
+    gesamte Datei (degenerierter Einzelseiten-Fall, gleicher Code-Pfad).
 """
 import struct
 from alphabets import Alphabet, HEADER_ALPHABET
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+DOCUMENT_ID_WIDTH = 8  # Byte, siehe pack_header
 PREAMBLE_N_WIDTH = 4       # Symbole fuer die Header-Zeilenanzahl N
 PREAMBLE_CHECK_WIDTH = 1   # Symbole fuer die Pruefsumme
 HEADER_COPIES = 3
@@ -45,7 +62,8 @@ class HeaderError(ValueError):
 
 def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r: int,
                  total_file_size: int, sha256_digest: bytes, ln_width: int,
-                 filename: str) -> bytes:
+                 filename: str, document_id: bytes, page_count: int, page_number: int,
+                 page_checksum: int) -> bytes:
     out = bytearray()
     out.append(FORMAT_VERSION)
     out.append(1 if is_custom_alphabet else 0)
@@ -57,6 +75,12 @@ def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r:
         chars = payload_alphabet.chars.encode("utf-8")
         out.extend(struct.pack(">H", len(chars)))
         out.extend(chars)
+    if len(document_id) != DOCUMENT_ID_WIDTH:
+        raise ValueError(f"document_id muss {DOCUMENT_ID_WIDTH} Byte lang sein")
+    out.extend(document_id)
+    out.extend(struct.pack(">H", page_count))
+    out.extend(struct.pack(">H", page_number))
+    out.extend(struct.pack(">I", page_checksum & 0xFFFFFFFF))
     out.extend(struct.pack(">H", k))
     out.extend(struct.pack(">H", r))
     out.extend(struct.pack(">Q", total_file_size))
@@ -92,6 +116,10 @@ def unpack_header(data: bytes) -> dict:
     if is_custom:
         alen = struct.unpack(">H", take(2))[0]
         alphabet_chars = take(alen).decode("utf-8")
+    document_id = take(DOCUMENT_ID_WIDTH)
+    page_count = struct.unpack(">H", take(2))[0]
+    page_number = struct.unpack(">H", take(2))[0]
+    page_checksum = struct.unpack(">I", take(4))[0]
     k = struct.unpack(">H", take(2))[0]
     r = struct.unpack(">H", take(2))[0]
     total_file_size = struct.unpack(">Q", take(8))[0]
@@ -102,6 +130,8 @@ def unpack_header(data: bytes) -> dict:
 
     return dict(
         version=version, is_custom_alphabet=is_custom, alphabet_chars=alphabet_chars,
+        document_id=document_id, page_count=page_count, page_number=page_number,
+        page_checksum=page_checksum,
         k=k, r=r, total_file_size=total_file_size, sha256=sha256_digest,
         ln_width=ln_width, filename=filename,
     )
@@ -142,6 +172,29 @@ def parse_preamble(line: str, header_alpha: Alphabet):
     for d in digits:
         n = n * base + d
     return n
+
+
+def find_preamble_positions(lines, header_alpha: Alphabet):
+    """Findet alle Positionen in `lines`, an denen eine gueltige Praeambel
+    steht (fuer Mehrseiten-Decode: jede Seite hat ihre eigene Praeambel,
+    irgendwo im - moeglicherweise aus mehreren Quellen zusammengefuegten
+    und/oder gemischt sortierten - Zeilenstrom). Eine Praeambel ist genau
+    PREAMBLE_N_WIDTH+PREAMBLE_CHECK_WIDTH (5) Zeichen lang und hat eine
+    gueltige Pruefsumme - beides zusammen macht eine zufaellige Kollision mit
+    einer (viel laengeren) Header-/Nutzdatenzeile praktisch ausgeschlossen.
+    Rueckgabe: sortierte Liste von Indizes in `lines`."""
+    expected_len = PREAMBLE_N_WIDTH + PREAMBLE_CHECK_WIDTH
+    positions = []
+    for idx, raw in enumerate(lines):
+        s = raw.strip()
+        if len(s) != expected_len:
+            continue
+        try:
+            parse_preamble(s, header_alpha)
+        except ValueError:
+            continue
+        positions.append(idx)
+    return positions
 
 
 # ---------------------------------------------------------------------------
