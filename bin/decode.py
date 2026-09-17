@@ -20,13 +20,15 @@ einem Glob-Pattern bestehen — decode.py sucht ueberall im kombinierten
 Zeilenstrom nach Seiten-Praeambeln und setzt die Seiten anhand ihrer
 Zeilennummern zusammen, unabhaengig von der Reihenfolge der Eingabe.
 
-UTF-8 vs. UTF-16LE (siehe --preset utf16le128/utf16le256 in encode.py) wird
+UTF-8 vs. UTF-16LE vs. UTF-32LE vs. UTF-32BE (siehe --preset utf16le128/
+utf16le256/utf32le128/utf32le256/utf32le512/utf32be512 in encode.py) wird
 PRO QUELLE automatisch anhand der Rohbytes erkannt, ohne die Datei neu zu
 oeffnen: das Header-Alphabet ist immer reines 7-Bit-ASCII und 0x00 ist in
 jedem Alphabet verboten, also kann UTF-8 nie ein rohes 0x00-Byte enthalten,
-waehrend ASCII als UTF-16LE immer "Byte, 0x00"-Paare erzeugt - eindeutig
-erkennbar an den ersten paar Bytes, auch ohne BOM (wichtig, wenn eine
-Seite als eigene Datei ohne den fuehrenden BOM der Gesamtdatei vorliegt).
+waehrend ASCII als UTF-16LE immer "Byte, 0x00"-Paare und als UTF-32LE/
+UTF-32BE immer drei 0x00-Bytes je Zeichen erzeugt - eindeutig erkennbar an
+den ersten paar Bytes, auch ohne BOM (wichtig, wenn eine Seite als eigene
+Datei ohne den fuehrenden BOM der Gesamtdatei vorliegt).
 
 Formatfehler (falsche Versionsnummer) fuehren zu einem harten Abbruch. Der
 Header EINER Seite ist weiterhin nicht redundant abgesichert (siehe
@@ -48,7 +50,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from alphabets import Alphabet, DEFAULT_ALPHABET, HEADER_ALPHABET
 from header import (
     HeaderError, parse_preamble, parse_header_lines, unpack_header, HEADER_COPIES,
-    find_preamble_positions, TEXT_ENCODING_UTF16LE,
+    find_preamble_positions,
+    TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE, TEXT_ENCODING_UTF32LE, TEXT_ENCODING_UTF32BE,
 )
 from rs_codec import GaloisField, rs_generator_poly
 from framing import (
@@ -73,17 +76,31 @@ def gather_input_paths(input_args):
 
 
 def sniff_and_decode(raw: bytes):
-    """Erkennt UTF-8 vs. UTF-16LE anhand der Rohbytes und decodiert damit -
-    kein erneutes Oeffnen/Lesen noetig (siehe Modul-Docstring). Ein
-    fuehrendes UTF-16LE-BOM (FF FE) wird erkannt und uebersprungen, ist aber
-    fuer die Erkennung selbst NICHT erforderlich: da 0x00 in jedem Alphabet
-    verboten ist (siehe Alphabet.__init__ in alphabets.py) und das Header-
-    Alphabet immer reines 7-Bit-ASCII ist, kann ein UTF-8-Strom nie ein
-    rohes 0x00-Byte enthalten, waehrend ASCII als UTF-16LE IMMER 'Byte,
-    0x00'-Paare erzeugt - eindeutig unterscheidbar an den ersten Bytes.
+    """Erkennt UTF-8 vs. UTF-16LE vs. UTF-32LE vs. UTF-32BE anhand der
+    Rohbytes und decodiert damit - kein erneutes Oeffnen/Lesen noetig (siehe
+    Modul-Docstring). Ein fuehrendes BOM wird erkannt und uebersprungen, ist
+    aber fuer die Erkennung selbst NICHT erforderlich: da 0x00 in jedem
+    Alphabet verboten ist (siehe Alphabet.__init__ in alphabets.py) und das
+    Header-Alphabet immer reines 7-Bit-ASCII ist, kann ein UTF-8-Strom nie
+    ein rohes 0x00-Byte enthalten, waehrend ASCII als UTF-16LE IMMER 'Byte,
+    0x00'-Paare und als UTF-32LE/UTF-32BE IMMER drei 0x00-Bytes je Zeichen
+    erzeugt - eindeutig unterscheidbar an den ersten Bytes.
+
+    Das UTF-16LE-BOM (FF FE) ist ein reiner Byte-PRAEFIX des UTF-32LE-BOM
+    (FF FE 00 00) - deshalb wird zuerst auf die laengeren/spezifischeren
+    4-Byte-Muster (BOM und Byte-Sniffing) geprueft, bevor auf die kuerzeren
+    2-Byte-Muster zurueckgefallen wird.
     Rueckgabe: (text, encoding_name)."""
-    if raw[:2] == b"\xff\xfe":
+    if raw[:4] == b"\xff\xfe\x00\x00":
+        text, encoding = raw[4:].decode("utf-32-le"), "utf-32-le"
+    elif raw[:4] == b"\x00\x00\xfe\xff":
+        text, encoding = raw[4:].decode("utf-32-be"), "utf-32-be"
+    elif raw[:2] == b"\xff\xfe":
         text, encoding = raw[2:].decode("utf-16-le"), "utf-16-le"
+    elif len(raw) >= 4 and raw[1] == 0 and raw[2] == 0 and raw[3] == 0:
+        text, encoding = raw.decode("utf-32-le"), "utf-32-le"
+    elif len(raw) >= 4 and raw[0] == 0 and raw[1] == 0 and raw[2] == 0:
+        text, encoding = raw.decode("utf-32-be"), "utf-32-be"
     elif len(raw) >= 2 and raw[1] == 0:
         text, encoding = raw.decode("utf-16-le"), "utf-16-le"
     else:
@@ -120,7 +137,7 @@ def read_all_input_lines(input_args):
         try:
             text, encoding = sniff_and_decode(raw)
         except UnicodeDecodeError as e:
-            print(f"FEHLER: {name} laesst sich weder als UTF-8 noch als UTF-16LE lesen ({e}).", file=sys.stderr)
+            print(f"FEHLER: {name} laesst sich weder als UTF-8 noch als UTF-16LE/UTF-32LE/UTF-32BE lesen ({e}).", file=sys.stderr)
             sys.exit(1)
         start = len(lines)
         lines.extend(text.split("\n"))
@@ -183,7 +200,13 @@ def main():
         # zum tatsaechlich per Byte-Sniffing erkannten Encoding ihrer Quelle
         # passen (siehe read_all_input_lines/sniff_and_decode). Nicht fatal
         # fuer den ganzen Lauf - wie jeder andere Seiten-Header-Fehler auch.
-        declared_encoding = "utf-16-le" if meta["text_encoding"] == TEXT_ENCODING_UTF16LE else "utf-8"
+        _HEADER_ENCODING_TO_CODEC = {
+            TEXT_ENCODING_UTF8: "utf-8",
+            TEXT_ENCODING_UTF16LE: "utf-16-le",
+            TEXT_ENCODING_UTF32LE: "utf-32-le",
+            TEXT_ENCODING_UTF32BE: "utf-32-be",
+        }
+        declared_encoding = _HEADER_ENCODING_TO_CODEC.get(meta["text_encoding"], "utf-8")
         sniffed_encoding = encoding_at(start, source_ranges)
         if declared_encoding != sniffed_encoding:
             print(

@@ -1,6 +1,6 @@
 """
-Reed-Solomon Codec ueber GF(2^m), m in {5,6,7,8} (Alphabetgroessen 32/64/128/256).
-Reine Python-Stdlib, keine Zusatzpakete.
+Reed-Solomon Codec ueber GF(2^m), m in {5,6,7,8,9} (Alphabetgroessen
+32/64/128/256/512). Reine Python-Stdlib, keine Zusatzpakete.
 
 Konvention:
 - Polynome sind Listen von Koeffizienten, HOECHSTER Grad zuerst (wie beim
@@ -20,6 +20,7 @@ PRIMITIVE_POLYS = {
     6: 0x43,   # x^6 + x + 1
     7: 0x89,   # x^7 + x^3 + 1
     8: 0x11D,  # x^8 + x^4 + x^3 + x^2 + 1
+    9: 0x211,  # x^9 + x^4 + 1
 }
 
 

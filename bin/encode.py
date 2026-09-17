@@ -20,8 +20,14 @@ import zlib
 # lib/ relativ zu diesem Skript einbinden, unabhaengig vom Aufrufverzeichnis
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from alphabets import Alphabet, DEFAULT_ALPHABET, make_alphabet, PRESET_NAMES
-from header import pack_header, build_header_lines, TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE
+from alphabets import (
+    Alphabet, DEFAULT_ALPHABET, make_alphabet, PRESET_NAMES,
+    ENCODING_UTF8, ENCODING_UTF16LE, ENCODING_UTF32LE, ENCODING_UTF32BE,
+)
+from header import (
+    pack_header, build_header_lines,
+    TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE, TEXT_ENCODING_UTF32LE, TEXT_ENCODING_UTF32BE,
+)
 from rs_codec import GaloisField, rs_generator_poly, rs_encode
 from framing import compute_layout, build_payload_line, crc_width_for, byte_offset_of_line
 from progress import ProgressBar
@@ -61,12 +67,21 @@ def main():
             "'utf16le256': wie 'utf16le128', aber 256 Zeichen (GF256, 8 Bit/Symbol, "
             "ca. 14%% dichter) - Box-Drawing/Block-Element-Symbole statt OCR-kuratierter "
             "Buchstaben, da fuer Zwischenablage-Transfer (nicht OCR) keine visuelle "
-            "Verwechslungsfreiheit noetig ist. decode.py erkennt UTF-16LE automatisch."
+            "Verwechslungsfreiheit noetig ist. "
+            "'utf32le128'/'utf32le256': dieselben Zeichen wie 'utf16le128'/'utf16le256', "
+            "aber die AUSGABEDATEI wird als UTF-32LE geschrieben - fuer den Workflow "
+            "'Get-Content -Encoding UTF32 datei.txt | Set-Clipboard' in PowerShell. "
+            "'utf32le512'/'utf32be512': NEUES 512-Zeichen-Set (GF512, 9 Bit/Symbol, "
+            "ca. 13%% dichter als 256er-Presets) aus dem Unicode-Block Mathematical "
+            "Alphanumeric Symbols - nur mit UTF-32 nutzbar, da UTF-16LE dafuer "
+            "Surrogatpaare braeuchte. 'le'/'be' waehlt die Byte-Reihenfolge der "
+            "Ausgabedatei (passend zu PowerShells 'UTF32'/'BigEndianUTF32'-Encodings). "
+            "decode.py erkennt UTF-16LE/UTF-32LE/UTF-32BE automatisch."
         ),
     )
     alpha_group.add_argument(
         "--alphabet",
-        help="Custom-Alphabet als String (Laenge muss 32/64/128/256 sein). Schliesst --preset aus.",
+        help="Custom-Alphabet als String (Laenge muss 32/64/128/256/512 sein). Schliesst --preset aus.",
     )
     ap.add_argument("--redundancy", type=float, default=None, help="Paritaet in Prozent von k (Default: 20.0)")
     ap.add_argument("--parity-symbols", type=int, default=None, help="Absolute Anzahl Paritaetssymbole r (statt --redundancy)")
@@ -101,10 +116,16 @@ def main():
     filename = args.filename if args.filename is not None else default_name
 
     header_alpha = Alphabet(DEFAULT_ALPHABET)
-    payload_alpha, is_custom, is_utf16le = make_alphabet(
+    payload_alpha, is_custom, out_codec = make_alphabet(
         preset=args.preset, custom_chars=args.alphabet
     )
-    text_encoding = TEXT_ENCODING_UTF16LE if is_utf16le else TEXT_ENCODING_UTF8
+    _CODEC_TO_TEXT_ENCODING = {
+        ENCODING_UTF8: TEXT_ENCODING_UTF8,
+        ENCODING_UTF16LE: TEXT_ENCODING_UTF16LE,
+        ENCODING_UTF32LE: TEXT_ENCODING_UTF32LE,
+        ENCODING_UTF32BE: TEXT_ENCODING_UTF32BE,
+    }
+    text_encoding = _CODEC_TO_TEXT_ENCODING[out_codec]
 
     gf = GaloisField(payload_alpha.bits_per_symbol)
 
@@ -177,12 +198,16 @@ def main():
         pages.append((preamble, header_lines, payload_lines[start:end]))
 
     # --- Ausgabe -------------------------------------------------------------
-    # "utf-16-le" (Python-Codec) fuegt KEIN BOM automatisch an (anders als das
-    # generische "utf-16") - fuer ein deterministisches Little-Endian-BOM wird
-    # das BOM-Zeichen U+FEFF explizit als allererstes Zeichen geschrieben.
-    # decode.py braucht das BOM nicht zwingend (Byte-Sniffing reicht, siehe
-    # dort), es ist reine Konvention fuer andere Werkzeuge (Notepad etc.).
-    out_encoding = "utf-16-le" if is_utf16le else "utf-8"
+    # "utf-16-le"/"utf-32-le"/"utf-32-be" (Python-Codecs) fuegen KEIN BOM
+    # automatisch an (anders als die generischen "utf-16"/"utf-32") - fuer ein
+    # deterministisches BOM wird das BOM-Zeichen U+FEFF explizit als
+    # allererstes Zeichen geschrieben; der jeweilige Codec kodiert es dann
+    # automatisch in der richtigen Byte-Reihenfolge/-breite (z.B. FF FE 00 00
+    # bei utf-32-le, 00 00 FE FF bei utf-32-be). decode.py braucht das BOM
+    # nicht zwingend (Byte-Sniffing reicht, siehe dort), es ist reine
+    # Konvention fuer andere Werkzeuge (Notepad etc.).
+    out_encoding = out_codec
+    needs_bom = out_codec != ENCODING_UTF8
 
     def write_page(out, preamble, header_lines, page_payload_lines, write_bom):
         if write_bom:
@@ -196,13 +221,13 @@ def main():
     if args.output and "*" in args.output:
         # Pro Seite eine eigene Datei ('*' -> 1-basierte, optimal Null-
         # aufgefuellte Seitennummer). Jede Datei ist ein eigenstaendiger
-        # Strom -> bekommt (falls utf16le) IHR EIGENES BOM; keine
+        # Strom -> bekommt (falls nicht UTF-8) IHR EIGENES BOM; keine
         # Leerzeilen-Trenner noetig (die Dateien sind schon physisch getrennt).
         width = len(str(page_count))
         for page_number, (preamble, header_lines, page_payload_lines) in enumerate(pages):
             path = args.output.replace("*", str(page_number + 1).zfill(width))
             with open(path, "w", encoding=out_encoding, newline="\n") as out:
-                write_page(out, preamble, header_lines, page_payload_lines, write_bom=is_utf16le)
+                write_page(out, preamble, header_lines, page_payload_lines, write_bom=needs_bom)
         print(f"Ausgabe: {page_count} Datei(en), Muster {args.output!r}.", file=sys.stderr)
     else:
         # Ein einziger Textstrom (Datei oder stdout) mit allen Seiten
@@ -214,7 +239,7 @@ def main():
             out = sys.stdout
         try:
             for page_number, (preamble, header_lines, page_payload_lines) in enumerate(pages):
-                write_page(out, preamble, header_lines, page_payload_lines, write_bom=(is_utf16le and page_number == 0))
+                write_page(out, preamble, header_lines, page_payload_lines, write_bom=(needs_bom and page_number == 0))
                 if page_number < page_count - 1:
                     out.write("\n\n\n")  # 3 Leerzeilen als Seitentrenner, vom Decoder ignoriert
         finally:

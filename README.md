@@ -28,8 +28,8 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `input` | Eingabedatei (optional, sonst stdin) |
 | `-o/--output` | Ausgabedatei (optional, sonst stdout). Enthält ein `*`, siehe "Seitenteilung" unten |
 | `--width` | Gesamte Zeilenbreite **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100) |
-| `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128), `utf16le128`/`utf16le256` (siehe "UTF-16LE-Presets" unten). Schließt `--alphabet` aus |
-| `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
+| `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128), `utf16le128`/`utf16le256`/`utf32le128`/`utf32le256`/`utf32le512`/`utf32be512` (siehe "UTF-16LE-/UTF-32-Presets" unten). Schließt `--alphabet` aus |
+| `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256/512 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
 | `--parity-symbols` | Absolute Paritätssymbolzahl r, statt `--redundancy` |
 | `--lines` | Nutzdatenzeilen pro Seite (siehe "Seitenteilung" unten). Default: keine Seitenteilung |
@@ -53,8 +53,8 @@ die ganze Datei (unverändert durch die Seitenteilung).
 
 Ohne `*` im `-o`-Dateinamen (oder bei Ausgabe nach stdout) werden alle
 Seiten in **einem einzigen Textstrom** hintereinander ausgegeben, getrennt
-durch 3 Leerzeilen — bei den UTF-16LE-Presets (siehe unten) erscheint dabei
-nur **ein** BOM ganz am Anfang des Gesamtstroms, nicht pro Seite.
+durch 3 Leerzeilen — bei den UTF-16LE-/UTF-32-Presets (siehe unten) erscheint
+dabei nur **ein** BOM ganz am Anfang des Gesamtstroms, nicht pro Seite.
 
 Enthält der `-o`-Dateiname dagegen ein `*` (z.B. `-o
 my/dir/output*.enc --lines 2000`), schreibt `encode.py` **eine eigene Datei
@@ -62,7 +62,7 @@ pro Seite**: `*` wird durch die 1-basierte Seitennummer ersetzt, mit
 optimaler Nullauffüllung (z.B. `output01.enc`, `output02.enc`, … bei 10-99
 Seiten; `output1.enc` bei nur 1 Seite; `output001.enc` ab 100 Seiten). Jede
 dieser Dateien ist ein eigenständiger, vollständiger Strom und bekommt bei
-den UTF-16LE-Presets **ihr eigenes BOM** — anders als beim einzelnen
+den UTF-16LE-/UTF-32-Presets **ihr eigenes BOM** — anders als beim einzelnen
 Gesamtstrom oben.
 
 `decode.py` akzeptiert Seiten in drei Formen, beliebig kombinierbar:
@@ -84,24 +84,50 @@ führen zum Abbruch (kein automatisches Aufteilen auf mehrere Dokumente).
   Stellen als Nullbytes), `<output>.errors.txt`/`.json` (alle fehlerhaften
   Zeilen mit Grund). SHA-256-Prüfung wird in diesem Fall übersprungen.
 
-**UTF-16LE-Presets:** `latin128`/`utf8128` unterscheiden sich nur in der
-*Zeichenauswahl* — die Ausgabedatei bleibt in jedem Fall UTF-8. `utf16le128`
-(identische 128 Zeichen wie `utf8128`) und `utf16le256` (neues 256-Zeichen-
-Set aus Box-Drawing-/Block-Element-/Geometrie-Symbolen, GF256, ca. 14%
-dichter, NICHT OCR-kuratiert) sind anders: hier schreibt `encode.py` die
-Ausgabedatei selbst als **echtes UTF-16LE** (mit BOM), statt nur andere
-Unicode-Zeichen in einer UTF-8-Datei zu benutzen. Gedacht für den
-Zwischenablage-Transfer, da Windows' natives Zwischenablage-Textformat
-(CF_UNICODETEXT) selbst UTF-16LE ist — vermeidet den UTF-8↔UTF-16-Umweg dort.
+**UTF-16LE-/UTF-32-Presets:** `latin128`/`utf8128` unterscheiden sich nur in
+der *Zeichenauswahl* — die Ausgabedatei bleibt in jedem Fall UTF-8. Sechs
+Presets sind anders: hier schreibt `encode.py` die Ausgabedatei selbst in
+einem breiteren Encoding (mit BOM), statt nur andere Unicode-Zeichen in
+einer UTF-8-Datei zu benutzen:
 
-`decode.py` erkennt UTF-8 vs. UTF-16LE **pro Quelle automatisch** an den
-Rohbytes, ohne die Datei neu zu öffnen und ohne dass ein BOM zwingend nötig
-wäre (funktioniert auch bei einer aus der Gesamtdatei herausgeschnittenen
-Einzelseite ohne führendes BOM, siehe "Seitenteilung" oben): das Header-
-Alphabet ist immer reines 7-Bit-ASCII, und `0x00` ist in jedem Alphabet
-verboten (siehe `alphabets.py`) — ein UTF-8-Strom kann also nie ein rohes
-`0x00`-Byte enthalten, während ASCII als UTF-16LE immer `Byte, 0x00`-Paare
-erzeugt. Das erkannte Encoding wird zusätzlich gegen ein explizites
+| Preset | Zeichen | Encoding der Ausgabedatei |
+|---|---|---|
+| `utf16le128` | identisch zu `utf8128` (128, GF128) | UTF-16LE |
+| `utf16le256` | neues 256er-Set: Box-Drawing/Block-Elements/Geometrie (GF256, ca. 14% dichter als 128er) | UTF-16LE |
+| `utf32le128` | identisch zu `utf16le128` | UTF-32LE |
+| `utf32le256` | identisch zu `utf16le256` | UTF-32LE |
+| `utf32le512` | neues 512er-Set: Mathematical Alphanumeric Symbols, U+1D400+ (GF512, ca. 13% dichter als 256er) | UTF-32LE |
+| `utf32be512` | identisch zu `utf32le512` | UTF-32BE |
+
+`utf16le128`/`utf16le256` sind für den Zwischenablage-Transfer gedacht, da
+Windows' natives Zwischenablage-Textformat (CF_UNICODETEXT) selbst UTF-16LE
+ist — vermeidet den UTF-8↔UTF-16-Umweg dort. Die `utf32*`-Presets sind für
+den Workflow `Get-Content -Raw -Encoding UTF32 datei.txt | Set-Clipboard`
+bzw. `-Encoding BigEndianUTF32` in PowerShell gedacht (`Set-Clipboard` selbst
+hat kein `-Encoding` — die Datei wird beim Lesen zu einem normalen
+.NET-String, danach ganz normal UTF-16 auf der Zwischenablage). Der
+eigentliche Mehrwert von `utf32le512`/`utf32be512` gegenüber den 256er-Presets
+ist nicht die Dateigröße (UTF-32 braucht pro Zeichen mehr Bytes als UTF-16),
+sondern das größere Alphabet: UTF-32 braucht anders als UTF-16LE keine
+Surrogatpaare für Codepoints jenseits der Basic Multilingual Plane, was den
+Pool an sicher nutzbaren Zeichen stark vergrößert. Das 512er-Zeichenset ist
+nach denselben Kriterien wie `utf16le256` kuratiert (NFC-zerlegungssicher,
+keine kombinierenden Zeichen), zusätzlich ohne jeden Emoji-präsentierten
+Unicode-Block, um zu verhindern, dass eine Ziel-App beim Einfügen Zeichen
+automatisch umschreibt (z.B. Variation-Selector-Zusatz).
+
+`decode.py` erkennt UTF-8/UTF-16LE/UTF-32LE/UTF-32BE **pro Quelle
+automatisch** an den Rohbytes, ohne die Datei neu zu öffnen und ohne dass ein
+BOM zwingend nötig wäre (funktioniert auch bei einer aus der Gesamtdatei
+herausgeschnittenen Einzelseite ohne führendes BOM, siehe "Seitenteilung"
+oben): das Header-Alphabet ist immer reines 7-Bit-ASCII, und `0x00` ist in
+jedem Alphabet verboten (siehe `alphabets.py`) — ein UTF-8-Strom kann also
+nie ein rohes `0x00`-Byte enthalten, während ASCII als UTF-16LE immer `Byte,
+0x00`-Paare und als UTF-32LE/UTF-32BE immer drei `0x00`-Bytes je Zeichen
+erzeugt. Das UTF-16LE-BOM (`FF FE`) ist ein reiner Byte-Präfix des
+UTF-32LE-BOM (`FF FE 00 00`) — die Erkennung prüft deshalb zuerst die
+längeren 4-Byte-Muster, bevor sie auf die kürzeren 2-Byte-Muster zurückfällt.
+Das erkannte Encoding wird zusätzlich gegen ein explizites
 `text_encoding`-Feld im Header jeder Seite geprüft; bei Widerspruch wird nur
 diese eine Seite übersprungen (wie bei jedem anderen Seiten-Header-Fehler).
 

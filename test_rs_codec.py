@@ -66,7 +66,7 @@ def run_field_tests(m):
         print(f"  r={r}: k={k}, max_correctable={max_correctable} -> Encode/Decode OK")
 
 
-for m in (5, 6, 7, 8):
+for m in (5, 6, 7, 8, 9):
     run_field_tests(m)
 
 print("\nAlle Kernfaelle bestanden.")

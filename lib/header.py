@@ -16,11 +16,13 @@ Header-Rohbytes (das, was bit-geslict wird):
     magic:            1 Byte  (Formatversion, aktuell 3)
     alphabet_mode:    1 Byte  (0 = Standard-Preset, 1 = Custom-Alphabet)
     [nur falls custom] alphabet_len: 2 Byte + alphabet_chars: alphabet_len Byte
-    text_encoding:    1 Byte  (0 = UTF-8, 1 = UTF-16LE - Encoding der
-                      AUSGABEDATEI selbst, siehe utf16le128/utf16le256 in
-                      alphabets.py. decode.py ermittelt dies bereits vorab
-                      per Byte-Sniffing der Rohdaten - dieses Feld dient nur
-                      als zusaetzlicher Cross-Check, siehe decode.py)
+    text_encoding:    1 Byte  (0 = UTF-8, 1 = UTF-16LE, 2 = UTF-32LE,
+                      3 = UTF-32BE - Encoding der AUSGABEDATEI selbst, siehe
+                      utf16le128/utf16le256/utf32le128/utf32le256/utf32le512/
+                      utf32be512 in alphabets.py. decode.py ermittelt dies
+                      bereits vorab per Byte-Sniffing der Rohdaten - dieses
+                      Feld dient nur als zusaetzlicher Cross-Check, siehe
+                      decode.py)
     document_id:      8 Byte  (zufaellig, von encode.py erzeugt - identisch auf
                       allen Seiten EINES Encode-Laufs, siehe Seitenteilung unten)
     page_count:       2 Byte (uint16, big-endian) - Gesamtzahl Seiten
@@ -52,6 +54,8 @@ FORMAT_VERSION = 3
 DOCUMENT_ID_WIDTH = 8  # Byte, siehe pack_header
 TEXT_ENCODING_UTF8 = 0
 TEXT_ENCODING_UTF16LE = 1
+TEXT_ENCODING_UTF32LE = 2
+TEXT_ENCODING_UTF32BE = 3
 PREAMBLE_N_WIDTH = 4       # Symbole fuer die Header-Zeilenanzahl N
 PREAMBLE_CHECK_WIDTH = 1   # Symbole fuer die Pruefsumme
 HEADER_COPIES = 3
@@ -82,8 +86,9 @@ def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r:
         chars = payload_alphabet.chars.encode("utf-8")
         out.extend(struct.pack(">H", len(chars)))
         out.extend(chars)
-    if text_encoding not in (TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE):
-        raise ValueError(f"text_encoding muss {TEXT_ENCODING_UTF8} oder {TEXT_ENCODING_UTF16LE} sein")
+    valid_encodings = (TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE, TEXT_ENCODING_UTF32LE, TEXT_ENCODING_UTF32BE)
+    if text_encoding not in valid_encodings:
+        raise ValueError(f"text_encoding muss eines von {valid_encodings} sein")
     out.append(text_encoding)
     if len(document_id) != DOCUMENT_ID_WIDTH:
         raise ValueError(f"document_id muss {DOCUMENT_ID_WIDTH} Byte lang sein")

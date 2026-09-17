@@ -5,16 +5,18 @@ Alphabete fuer die Terminal-Darstellung.
   Zeichen. Wird fuer Praeambel, Header, Zeilennummer und CRC-Feld benutzt,
   unabhaengig davon, welches Alphabet fuer die Nutzdaten gewaehlt wurde.
 - Nutzdaten-Alphabet: Default = dasselbe wie HEADER_ALPHABET, ueberschreibbar
-  per --alphabet. Muss eine Zweierpotenz-Laenge haben (32/64/128/256).
-- Manche Presets (siehe utf16le128/utf16le256 unten) verlangen zusaetzlich,
-  dass die AUSGABEDATEI selbst als UTF-16LE statt UTF-8 geschrieben wird -
-  das ist eine reine I/O-Angelegenheit von encode.py/decode.py, hat mit den
+  per --alphabet. Muss eine Zweierpotenz-Laenge haben (32/64/128/256/512).
+- Manche Presets (siehe utf16le128/utf16le256/utf32le128/utf32le256/
+  utf32le512/utf32be512 unten) verlangen zusaetzlich, dass die AUSGABEDATEI
+  selbst als UTF-16LE/UTF-32LE/UTF-32BE statt UTF-8 geschrieben wird - das
+  ist eine reine I/O-Angelegenheit von encode.py/decode.py, hat mit den
   Zeichen hier nichts zu tun (Python-str ist immer codepoint-basiert,
   unabhaengig von jeder Datei-Byte-Kodierung).
 """
+import unicodedata
 from collections import namedtuple
 
-ALLOWED_ALPHABET_SIZES = (32, 64, 128, 256)
+ALLOWED_ALPHABET_SIZES = (32, 64, 128, 256, 512)
 
 # 64 Zeichen, bewusst ohne bekannte Verwechslungspaare:
 #   Ziffern ohne 0/1/5/8 (Verwechslung mit O/I,l/S,s/B)
@@ -103,7 +105,7 @@ assert len(PRESET_UTF8128) == 128 and len(set(PRESET_UTF8128)) == 128
 
 # utf16le128: EXAKT dieselben 128 Zeichen wie utf8128 - der einzige
 # Unterschied ist, dass encode.py die Ausgabedatei fuer dieses Preset als
-# UTF-16LE statt UTF-8 schreibt (siehe PRESETS unten, is_utf16le=True).
+# UTF-16LE statt UTF-8 schreibt (siehe PRESETS unten, text_encoding=ENCODING_UTF16LE).
 # Fuer eine treue Uebertragung durch die Windows-Zwischenablage (deren
 # natives Textformat CF_UNICODETEXT selbst UTF-16LE ist) - vermeidet den
 # UTF-8<->UTF-16-Umweg dort.
@@ -125,7 +127,7 @@ PRESET_UTF16LE128 = PRESET_UTF8128
 # Alle Zeichen sind einzelne BMP-Codepoints (keine Surrogatpaare noetig) und
 # in praktisch jeder Monospace-Schrift einspaltig breit (dafuer gemacht).
 # Nutzt GF(256), 8 Bit/Symbol - genau 1 Byte/Symbol, ca. 14% dichter als die
-# 128er-Presets. Erfordert UTF-16LE-faehigen Empfaenger (siehe is_utf16le).
+# 128er-Presets. Erfordert UTF-16LE-faehigen Empfaenger (siehe text_encoding).
 _BOX_DRAWING = "".join(chr(c) for c in range(0x2500, 0x2580))       # 128 Zeichen
 _BLOCK_ELEMENTS = "".join(chr(c) for c in range(0x2580, 0x25A0))    # 32 Zeichen
 _GEOMETRIC_SHAPES_SUBSET = chr(0x25A0) + chr(0x25A1)                 # ■ □ (2 Zeichen)
@@ -135,19 +137,62 @@ PRESET_UTF16LE256 = (
 )
 assert len(PRESET_UTF16LE256) == 256 and len(set(PRESET_UTF16LE256)) == 256
 
-# chars: das Zeichen-Alphabet (wie bisher). is_utf16le: ob encode.py die
-# Ausgabedatei fuer dieses Preset als UTF-16LE statt UTF-8 schreiben muss
-# (siehe make_alphabet() und encode.py/decode.py - reine I/O-Eigenschaft,
-# betrifft nicht, wie die Zeichen hier im Python-Quelltext selbst stehen).
-Preset = namedtuple("Preset", ["chars", "is_utf16le"])
+# utf32le128/utf32le256: dieselben Zeichen wie utf16le128/utf16le256 - reine
+# I/O-Varianten (Ausgabedatei als UTF-32LE statt UTF-16LE/UTF-8), keine neue
+# Zeichenauswahl. Motivation: 'Get-Content -Raw -Encoding UTF32 datei.txt |
+# Set-Clipboard' als alternativer Zwischenablage-Workflow zu utf16le* (Set-
+# Clipboard selbst hat kein -Encoding - die Datei wird beim Lesen zu einem
+# normalen .NET-String, danach ganz normal UTF-16 auf der Zwischenablage).
+PRESET_UTF32LE128 = PRESET_UTF16LE128
+PRESET_UTF32LE256 = PRESET_UTF16LE256
+
+# utf32le512/utf32be512: NEUES 512-Zeichen-Set (9 Bit/Symbol, GF512, ca. 13%
+# dichter als die 256er-Presets) - moeglich, weil UTF-32 anders als UTF-16LE
+# keine Surrogatpaare fuer Codepoints jenseits der BMP braucht, was den Pool
+# an brauchbaren Zeichen stark vergroessert. Quelle: Unicode-Block
+# "Mathematical Alphanumeric Symbols" (U+1D400-U+1D7FF) - alle darin
+# zugewiesenen Codepoints sind (a) keine kombinierenden Zeichen, (b) haben
+# KEINE kanonische Zerlegung (nur eine Kompatibilitaets-Zerlegung <font>, die
+# NFC nicht anfasst - NFC normalisiert ausschliesslich kanonische
+# Zerlegungen weg, siehe utf16le256 oben) und (c) gehoeren zu keinem Emoji-
+# praesentierten Block - dieselben Sicherheitskriterien wie bei utf16le256,
+# hier zusaetzlich relevant weil die Zeichen jenseits der BMP liegen. Der
+# Block hat 24 bewusst nicht zugewiesene Luecken (Buchstaben, die schon im
+# BMP-Block "Letterlike Symbols" existieren, z.B. ℎ/PLANCK CONSTANT) - diese
+# werden uebersprungen; die ersten 512 zugewiesenen Codepoints ab U+1D400
+# ergeben den Satz (die verbleibenden ca. 460 Zeichen des ~996 Zeichen
+# umfassenden Blocks bleiben ungenutzt). GF(512) braucht ein eigenes
+# primitives Polynom fuer m=9, siehe rs_codec.py.
+_MATH_ALPHANUM_ASSIGNED = [
+    chr(cp) for cp in range(0x1D400, 0x1D800)
+    if unicodedata.category(chr(cp)) != "Cn"
+]
+PRESET_UTF32_512 = "".join(_MATH_ALPHANUM_ASSIGNED[:512])
+assert len(PRESET_UTF32_512) == 512 and len(set(PRESET_UTF32_512)) == 512
+
+# chars: das Zeichen-Alphabet (wie bisher). text_encoding: welches Python-
+# Codec-Encoding encode.py fuer die Ausgabedatei dieses Presets benutzen
+# muss (siehe make_alphabet() und encode.py/decode.py - reine I/O-
+# Eigenschaft, betrifft nicht, wie die Zeichen hier im Python-Quelltext
+# selbst stehen). "utf-8" fuer alle "normalen" Presets.
+Preset = namedtuple("Preset", ["chars", "text_encoding"])
+
+ENCODING_UTF8 = "utf-8"
+ENCODING_UTF16LE = "utf-16-le"
+ENCODING_UTF32LE = "utf-32-le"
+ENCODING_UTF32BE = "utf-32-be"
 
 PRESETS = {
-    "default":     Preset(DEFAULT_ALPHABET, False),
-    "ascii64":     Preset(PRESET_ASCII64, False),
-    "latin128":    Preset(PRESET_LATIN128, False),
-    "utf8128":     Preset(PRESET_UTF8128, False),
-    "utf16le128":  Preset(PRESET_UTF16LE128, True),
-    "utf16le256":  Preset(PRESET_UTF16LE256, True),
+    "default":     Preset(DEFAULT_ALPHABET, ENCODING_UTF8),
+    "ascii64":     Preset(PRESET_ASCII64, ENCODING_UTF8),
+    "latin128":    Preset(PRESET_LATIN128, ENCODING_UTF8),
+    "utf8128":     Preset(PRESET_UTF8128, ENCODING_UTF8),
+    "utf16le128":  Preset(PRESET_UTF16LE128, ENCODING_UTF16LE),
+    "utf16le256":  Preset(PRESET_UTF16LE256, ENCODING_UTF16LE),
+    "utf32le128":  Preset(PRESET_UTF32LE128, ENCODING_UTF32LE),
+    "utf32le256":  Preset(PRESET_UTF32LE256, ENCODING_UTF32LE),
+    "utf32le512":  Preset(PRESET_UTF32_512, ENCODING_UTF32LE),
+    "utf32be512":  Preset(PRESET_UTF32_512, ENCODING_UTF32BE),
 }
 
 PRESET_NAMES = list(PRESETS)
@@ -233,25 +278,27 @@ class Alphabet:
 
 
 def make_alphabet(preset: str | None = None,
-                  custom_chars: str | None = None) -> tuple["Alphabet", bool, bool]:
-    """Gibt (Alphabet, is_custom, is_utf16le) zurueck.
+                  custom_chars: str | None = None) -> tuple["Alphabet", bool, str]:
+    """Gibt (Alphabet, is_custom, text_encoding) zurueck. text_encoding ist
+    eines der ENCODING_*-Konstanten oben (Python-Codec-Name der Ausgabedatei).
 
     is_custom=False nur fuer das 'default'-Preset (Alphabet-Zeichen werden dann
     NICHT im Header gespeichert, weil decode.py das Default kennt). Alle anderen
     Presets und Custom-Strings setzen is_custom=True und speichern die Zeichen
     im Header, damit decode.py sie ohne zusaetzliche Parameter rekonstruieren kann.
 
-    is_utf16le=True nur fuer utf16le128/utf16le256 - Custom-Alphabete sind
-    immer UTF-8 (kein --alphabet-Aequivalent zu --preset utf16le* vorgesehen).
+    text_encoding != ENCODING_UTF8 nur fuer utf16le128/utf16le256/utf32le128/
+    utf32le256/utf32le512/utf32be512 - Custom-Alphabete sind immer UTF-8 (kein
+    --alphabet-Aequivalent zu diesen Presets vorgesehen).
 
     Rangfolge: custom_chars > preset > 'default'.
     """
     if custom_chars is not None:
-        return Alphabet(custom_chars), True, False
+        return Alphabet(custom_chars), True, ENCODING_UTF8
     name = preset or "default"
     if name not in PRESETS:
         raise ValueError(
             f"Unbekanntes Preset {name!r}. Gueltig: {PRESET_NAMES}"
         )
     p = PRESETS[name]
-    return Alphabet(p.chars), (name != "default"), p.is_utf16le
+    return Alphabet(p.chars), (name != "default"), p.text_encoding
