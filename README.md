@@ -42,6 +42,7 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `input` | OCR-Text-/Seiten-Datei(en) (optional, sonst stdin). Mehrere Dateien und/oder Glob-Patterns (z.B. `"seite_*.txt"`) sind erlaubt |
 | `-o/--output` | Basisname der Ausgabe (Default `output`) |
 | `--error-report-format` | `text` (Default) oder `json` |
+| `--header` | Nur die Header aller Seiten jeder Eingabedatei ausgeben (nach stdout); Nutzdaten werden nicht verarbeitet, `-o` wird ignoriert |
 
 **Seitenteilung:** `encode.py --lines N` teilt die Nutzdaten in Seiten zu je
 N Zeilen auf. Jede Seite trägt eine **vollständige eigene Kopie** des
@@ -130,6 +131,14 @@ längeren 4-Byte-Muster, bevor sie auf die kürzeren 2-Byte-Muster zurückfällt
 Das erkannte Encoding wird zusätzlich gegen ein explizites
 `text_encoding`-Feld im Header jeder Seite geprüft; bei Widerspruch wird nur
 diese eine Seite übersprungen (wie bei jedem anderen Seiten-Header-Fehler).
+
+Praeambel und Header werden **immer als ASCII** gelesen (Nicht-ASCII-Zeichen
+gelten dort als unlesbar), unabhängig vom Encoding der Nutzdaten — ein
+ungültiges Nutzdaten-Zeichen kann das Lesen des Headers also nicht
+verhindern. Ein 8-Bit-Strom, der kein gültiges UTF-8 ist, wird für die
+Nutzdaten als **Latin-1** gelesen (mit Hinweis auf stderr). Das betrifft
+z.B. `latin128`-Seiten, die ein OCR-Tool oder Editor als „ANSI“ gespeichert
+hat; der Header-Cross-Check behandelt das wie UTF-8.
 
 **Zwischenablage statt OCR:** Bei sehr großen Dateien reicht ein einzelner
 Copy/Paste-Vorgang oft nicht aus, sodass mehrere Teilstücke nacheinander

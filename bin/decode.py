@@ -75,13 +75,13 @@ def gather_input_paths(input_args):
     return paths
 
 
-def sniff_and_decode(raw: bytes):
-    """Erkennt UTF-8 vs. UTF-16LE vs. UTF-32LE vs. UTF-32BE anhand der
-    Rohbytes und decodiert damit - kein erneutes Oeffnen/Lesen noetig (siehe
-    Modul-Docstring). Ein fuehrendes BOM wird erkannt und uebersprungen, ist
-    aber fuer die Erkennung selbst NICHT erforderlich: da 0x00 in jedem
-    Alphabet verboten ist (siehe Alphabet.__init__ in alphabets.py) und das
-    Header-Alphabet immer reines 7-Bit-ASCII ist, kann ein UTF-8-Strom nie
+def sniff_layout(raw: bytes):
+    """Erkennt anhand der Rohbytes, ob ein 8-Bit-Strom (UTF-8/Latin-1) oder
+    UTF-16LE/UTF-32LE/UTF-32BE vorliegt - kein erneutes Oeffnen/Lesen noetig
+    (siehe Modul-Docstring). Ein fuehrendes BOM wird erkannt, ist aber fuer
+    die Erkennung selbst NICHT erforderlich: da 0x00 in jedem Alphabet
+    verboten ist (siehe Alphabet.__init__ in alphabets.py) und das
+    Header-Alphabet immer reines 7-Bit-ASCII ist, kann ein 8-Bit-Strom nie
     ein rohes 0x00-Byte enthalten, waehrend ASCII als UTF-16LE IMMER 'Byte,
     0x00'-Paare und als UTF-32LE/UTF-32BE IMMER drei 0x00-Bytes je Zeichen
     erzeugt - eindeutig unterscheidbar an den ersten Bytes.
@@ -90,59 +90,179 @@ def sniff_and_decode(raw: bytes):
     (FF FE 00 00) - deshalb wird zuerst auf die laengeren/spezifischeren
     4-Byte-Muster (BOM und Byte-Sniffing) geprueft, bevor auf die kuerzeren
     2-Byte-Muster zurueckgefallen wird.
-    Rueckgabe: (text, encoding_name)."""
+    Rueckgabe: (codec, bom_len). codec ist "utf-8" fuer jeden 8-Bit-Strom
+    (entspricht text_encoding=UTF-8 im Header), ob die Nutzdaten nun
+    tatsaechlich UTF-8 oder Latin-1 sind (siehe decode_payload_text)."""
     if raw[:4] == b"\xff\xfe\x00\x00":
-        text, encoding = raw[4:].decode("utf-32-le"), "utf-32-le"
-    elif raw[:4] == b"\x00\x00\xfe\xff":
-        text, encoding = raw[4:].decode("utf-32-be"), "utf-32-be"
-    elif raw[:2] == b"\xff\xfe":
-        text, encoding = raw[2:].decode("utf-16-le"), "utf-16-le"
-    elif len(raw) >= 4 and raw[1] == 0 and raw[2] == 0 and raw[3] == 0:
-        text, encoding = raw.decode("utf-32-le"), "utf-32-le"
-    elif len(raw) >= 4 and raw[0] == 0 and raw[1] == 0 and raw[2] == 0:
-        text, encoding = raw.decode("utf-32-be"), "utf-32-be"
-    elif len(raw) >= 2 and raw[1] == 0:
-        text, encoding = raw.decode("utf-16-le"), "utf-16-le"
-    else:
-        text, encoding = raw.decode("utf-8"), "utf-8"
+        return "utf-32-le", 4
+    if raw[:4] == b"\x00\x00\xfe\xff":
+        return "utf-32-be", 4
+    if raw[:2] == b"\xff\xfe":
+        return "utf-16-le", 2
+    if len(raw) >= 4 and raw[1] == 0 and raw[2] == 0 and raw[3] == 0:
+        return "utf-32-le", 0
+    if len(raw) >= 4 and raw[0] == 0 and raw[1] == 0 and raw[2] == 0:
+        return "utf-32-be", 0
+    if len(raw) >= 2 and raw[1] == 0:
+        return "utf-16-le", 0
+    return "utf-8", 0
+
+
+def split_text_lines(text: str):
     # Binäres Lesen umgeht Pythons Universal-Newlines-Übersetzung (die ein
     # Text-mode open() automatisch macht) - von Hand nachholen, falls die
     # Quelle mit \r\n oder \r statt \n endet (z.B. unter Windows erzeugt).
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return text, encoding
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
-def read_all_input_lines(input_args):
+def decode_header_text(raw: bytes):
+    """ASCII-Sicht einer Quelle fuer Praeambel und Header: das Header-Alphabet
+    ist immer reines 7-Bit-ASCII, also wird jedes Nicht-ASCII-Zeichen durch
+    U+FFFD ersetzt (macht nur Nutzdatenzeilen 'unlesbar', die hier ohnehin
+    nicht interessieren). Schlaegt nie fehl - ein Nutzdaten-Zeichen, das im
+    jeweiligen Text-Encoding ungueltig ist, kann so das Lesen des Headers
+    nicht mehr verhindern. Die Zeilenstruktur stimmt mit decode_payload_text
+    ueberein (Zeilenumbrueche sind ASCII), Zeilenindizes sind also in beiden
+    Sichten identisch."""
+    codec, bom_len = sniff_layout(raw)
+    if codec == "utf-8":
+        return raw.decode("ascii", errors="replace")
+    text = raw[bom_len:].decode(codec, errors="replace")
+    return "".join(c if c < "\x80" else "�" for c in text)
+
+
+def decode_payload_text(raw: bytes):
+    """Volle Text-Sicht einer Quelle fuer die Nutzdatenzeilen. Ein 8-Bit-Strom
+    wird als UTF-8 gelesen, und - falls das scheitert - als Latin-1 (z.B.
+    wenn OCR-Tool oder Editor die Seite als 'ANSI' gespeichert haben; das
+    latin128-Preset liegt komplett im Latin-1-Bereich).
+    Rueckgabe: (text, layout_codec, text_codec). Wirft UnicodeDecodeError
+    nur bei kaputtem UTF-16/UTF-32."""
+    codec, bom_len = sniff_layout(raw)
+    if codec != "utf-8":
+        return raw[bom_len:].decode(codec), codec, codec
+    try:
+        return raw.decode("utf-8"), codec, "utf-8"
+    except UnicodeDecodeError:
+        return raw.decode("latin-1"), codec, "latin-1"
+
+
+def read_sources(input_args):
     """Liest alle Quellen (stdin, oder eine/mehrere Dateien/Patterns) als
-    Rohbytes, erkennt und decodiert jede Quelle EINZELN (sniff_and_decode)
-    und haengt die resultierenden Zeilenlisten aneinander - sonst koennte
-    die letzte Zeile einer Datei mit der ersten Zeile der naechsten
-    verschmelzen.
+    Rohbytes. Rueckgabe: Liste von (name, raw)."""
+    if not input_args:
+        return [("<stdin>", sys.stdin.buffer.read())]
+    sources = []
+    for path in gather_input_paths(input_args):
+        with open(path, "rb") as f:
+            sources.append((path, f.read()))
+    return sources
 
-    Rueckgabe: (lines, source_ranges). source_ranges: Liste von
-    (start_idx, end_idx_exklusiv, encoding_name) pro Quelle, fuer den
+
+def read_all_input_lines(sources):
+    """Decodiert jede Quelle EINZELN (Header als ASCII, Nutzdaten im
+    erkannten Text-Encoding) und haengt die resultierenden Zeilenlisten
+    aneinander - sonst koennte die letzte Zeile einer Datei mit der ersten
+    Zeile der naechsten verschmelzen.
+
+    Rueckgabe: (header_lines, payload_lines, source_ranges). Beide
+    Zeilenlisten sind gleich lang und indexgleich. source_ranges: Liste von
+    (start_idx, end_idx_exklusiv, layout_codec) pro Quelle, fuer den
     spaeteren Cross-Check gegen das von jeder Seite im Header deklarierte
     text_encoding-Feld (siehe main())."""
-    if not input_args:
-        sources = [("<stdin>", sys.stdin.buffer.read())]
-    else:
-        sources = []
-        for path in gather_input_paths(input_args):
-            with open(path, "rb") as f:
-                sources.append((path, f.read()))
-
-    lines = []
+    header_lines = []
+    payload_lines = []
     source_ranges = []
     for name, raw in sources:
         try:
-            text, encoding = sniff_and_decode(raw)
+            text, layout_codec, text_codec = decode_payload_text(raw)
         except UnicodeDecodeError as e:
-            print(f"FEHLER: {name} laesst sich weder als UTF-8 noch als UTF-16LE/UTF-32LE/UTF-32BE lesen ({e}).", file=sys.stderr)
+            print(f"FEHLER: {name} laesst sich nicht als {sniff_layout(raw)[0].upper()} lesen ({e}).", file=sys.stderr)
             sys.exit(1)
-        start = len(lines)
-        lines.extend(text.split("\n"))
-        source_ranges.append((start, len(lines), encoding))
-    return lines, source_ranges
+        if text_codec == "latin-1":
+            print(f"Hinweis: {name} ist kein gueltiges UTF-8 - Nutzdaten werden als Latin-1 gelesen.", file=sys.stderr)
+        h_lines = split_text_lines(decode_header_text(raw))
+        p_lines = split_text_lines(text)
+        assert len(h_lines) == len(p_lines), "Header- und Nutzdaten-Sicht muessen zeilengleich sein"
+        start = len(header_lines)
+        header_lines.extend(h_lines)
+        payload_lines.extend(p_lines)
+        source_ranges.append((start, len(header_lines), layout_codec))
+    return header_lines, payload_lines, source_ranges
+
+
+def parse_page_header(seg, header_alpha):
+    """seg: Zeilen (ASCII-Sicht) ab einer Praeambel. Rueckgabe: (meta,
+    n_header_body_lines). Wirft HeaderError."""
+    preamble_line = seg[0].strip()
+    n_header_lines = parse_preamble(preamble_line, header_alpha)
+    expected_header_body = n_header_lines * HEADER_COPIES
+    body_window = seg[1:1 + expected_header_body]
+    header_bytes = parse_header_lines(preamble_line, body_window, 0, header_alpha)
+    return unpack_header(header_bytes), expected_header_body
+
+
+_HEADER_ENCODING_NAMES = {
+    TEXT_ENCODING_UTF8: "UTF-8",
+    TEXT_ENCODING_UTF16LE: "UTF-16LE",
+    TEXT_ENCODING_UTF32LE: "UTF-32LE",
+    TEXT_ENCODING_UTF32BE: "UTF-32BE",
+}
+
+
+def format_header(meta):
+    if meta["is_custom_alphabet"]:
+        alphabet = f"eigenes Alphabet ({len(meta['alphabet_chars'])} Zeichen): {meta['alphabet_chars']}"
+    else:
+        alphabet = "Standard-Alphabet"
+    enc = meta["text_encoding"]
+    rows = [
+        ("Formatversion", meta["version"]),
+        ("Alphabet", alphabet),
+        ("Text-Encoding", f"{_HEADER_ENCODING_NAMES.get(enc, 'unbekannt')} ({enc})"),
+        ("Dokument-ID", meta["document_id"].hex()),
+        ("Seite", f"{meta['page_number']} (0-basiert) von {meta['page_count']}"),
+        ("Seiten-Pruefsumme", f"0x{meta['page_checksum']:08x}"),
+        ("Block k / r", f"{meta['k']} / {meta['r']}"),
+        ("Zeilennummer-Breite", meta["ln_width"]),
+        ("Dateigroesse", f"{meta['total_file_size']} Bytes"),
+        ("SHA-256", meta["sha256"].hex()),
+        ("Dateiname", meta["filename"] or "(keiner gespeichert)"),
+    ]
+    width = max(len(label) for label, _ in rows) + 1
+    return "\n".join(f"  {label + ':':<{width}} {value}" for label, value in rows)
+
+
+def print_headers(sources):
+    """--header: gibt fuer jede Quelle die Header aller darin gefundenen
+    Seiten aus, ohne die Nutzdaten anzufassen. Liest nur die ASCII-Sicht.
+    Rueckgabe: True, wenn jede Quelle mindestens einen lesbaren Header hatte
+    und kein Header unlesbar war."""
+    # Custom-Alphabete koennen Zeichen enthalten, die die Konsole nicht kann
+    sys.stdout.reconfigure(errors="backslashreplace")
+    header_alpha = Alphabet(HEADER_ALPHABET)
+    all_ok = True
+    for idx, (name, raw) in enumerate(sources):
+        if idx:
+            print()
+        print(f"== {name} ==")
+        lines = split_text_lines(decode_header_text(raw))
+        positions = find_preamble_positions(lines, header_alpha)
+        if not positions:
+            print("  (keine gueltige Seiten-Praeambel gefunden)")
+            all_ok = False
+            continue
+        for start in positions:
+            try:
+                meta, _ = parse_page_header(lines[start:], header_alpha)
+            except HeaderError as e:
+                print(f"  Zeile {start + 1}: Header nicht rekonstruierbar ({e})")
+                all_ok = False
+                continue
+            if len(positions) > 1:
+                print(f" -- Seite ab Zeile {start + 1} --")
+            print(format_header(meta))
+    return all_ok
 
 
 def encoding_at(idx, source_ranges):
@@ -164,16 +284,24 @@ def main():
     )
     ap.add_argument("-o", "--output", default="output", help="Basisname der Ausgabedatei(en) (Default: 'output')")
     ap.add_argument("--error-report-format", choices=["text", "json"], default="text")
+    ap.add_argument(
+        "--header", action="store_true",
+        help="Nur die Header aller Seiten jeder Eingabedatei ausgeben, Nutzdaten nicht verarbeiten",
+    )
     args = ap.parse_args()
 
-    lines, source_ranges = read_all_input_lines(args.input)
-    if not any(l.strip() for l in lines):
+    sources = read_sources(args.input)
+    if args.header:
+        sys.exit(0 if print_headers(sources) else 1)
+
+    header_lines, payload_lines, source_ranges = read_all_input_lines(sources)
+    if not any(l.strip() for l in header_lines):
         print("FEHLER: Eingabe ist komplett leer.", file=sys.stderr)
         sys.exit(1)
 
     header_alpha = Alphabet(HEADER_ALPHABET)
 
-    preamble_positions = find_preamble_positions(lines, header_alpha)
+    preamble_positions = find_preamble_positions(header_lines, header_alpha)
     if not preamble_positions:
         print("FEHLER (Praeambel): keine gueltige Seiten-Praeambel in der Eingabe gefunden.", file=sys.stderr)
         sys.exit(1)
@@ -182,24 +310,20 @@ def main():
     # fatal fuer den ganzen Lauf - nur diese eine Seite faellt aus) -----------
     pages = []  # dicts: meta, rest_lines
     for i, start in enumerate(preamble_positions):
-        end = preamble_positions[i + 1] if i + 1 < len(preamble_positions) else len(lines)
-        seg = lines[start:end]
-        preamble_line = seg[0].strip()
+        end = preamble_positions[i + 1] if i + 1 < len(preamble_positions) else len(header_lines)
         try:
-            n_header_lines = parse_preamble(preamble_line, header_alpha)
-            expected_header_body = n_header_lines * HEADER_COPIES
-            body_window = seg[1:1 + expected_header_body]
-            seg_rest_lines = seg[1 + expected_header_body:]
-            header_bytes = parse_header_lines(preamble_line, body_window, 0, header_alpha)
-            meta = unpack_header(header_bytes)
+            meta, expected_header_body = parse_page_header(header_lines[start:end], header_alpha)
         except HeaderError as e:
             print(f"Hinweis: Header einer Seite nicht rekonstruierbar ({e}) - diese Seite wird uebersprungen.", file=sys.stderr)
             continue
+        seg_rest_lines = payload_lines[start + 1 + expected_header_body:end]
 
         # Cross-Check: von dieser Seite deklariertes text_encoding-Feld muss
         # zum tatsaechlich per Byte-Sniffing erkannten Encoding ihrer Quelle
-        # passen (siehe read_all_input_lines/sniff_and_decode). Nicht fatal
-        # fuer den ganzen Lauf - wie jeder andere Seiten-Header-Fehler auch.
+        # passen (siehe read_all_input_lines/sniff_layout). Ein Latin-1-
+        # gelesener 8-Bit-Strom zaehlt dabei als UTF-8 (text_encoding=0
+        # steht fuer "8-Bit-Strom"). Nicht fatal fuer den ganzen Lauf - wie
+        # jeder andere Seiten-Header-Fehler auch.
         _HEADER_ENCODING_TO_CODEC = {
             TEXT_ENCODING_UTF8: "utf-8",
             TEXT_ENCODING_UTF16LE: "utf-16-le",

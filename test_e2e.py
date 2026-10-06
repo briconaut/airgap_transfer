@@ -597,6 +597,62 @@ def test_output_pattern_single_bom_without_star():
     print(" OK: genau ein BOM im Gesamtstrom, Roundtrip exakt")
 
 
+def test_latin128_saved_as_latin1():
+    print("== Test 18: latin128-Seiten als Latin-1 ('ANSI') gespeichert ==")
+    src = f"{WORKDIR}/t18_src.bin"
+    enc = f"{WORKDIR}/t18_enc*.txt"
+    out = f"{WORKDIR}/t18_out"
+    for old in glob.glob(f"{WORKDIR}/t18_enc*.txt"):
+        os.remove(old)
+    make_test_file(src, 8_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--preset", "latin128", "--lines", "38"])
+    assert r.returncode == 0, r.stderr
+    pages = sorted(glob.glob(f"{WORKDIR}/t18_enc*.txt"))
+    assert len(pages) > 1
+    # Simuliert OCR-Tool/Editor, das die Seiten als Latin-1 statt UTF-8 speichert
+    for path in pages:
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+        with open(path, "w", encoding="latin-1", newline="") as f:
+            f.write(text)
+
+    r2 = run([sys.executable, DECODE, *pages, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    assert "Latin-1" in r2.stderr
+
+    with open(src, "rb") as f:
+        expected = f.read()
+    with open(out, "rb") as f:
+        actual = f.read()
+    assert expected == actual
+    print(" OK: Latin-1-Seiten exakt rekonstruiert")
+
+
+def test_header_only():
+    print("== Test 19: --header gibt nur die Header aller Dateien aus ==")
+    src = f"{WORKDIR}/t19_src.bin"
+    enc = f"{WORKDIR}/t19_enc*.txt"
+    out = f"{WORKDIR}/t19_out"
+    for old in glob.glob(f"{WORKDIR}/t19_enc*.txt") + glob.glob(f"{out}*"):
+        os.remove(old)
+    make_test_file(src, 5_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--lines", "20"])
+    assert r.returncode == 0, r.stderr
+    pages = sorted(glob.glob(f"{WORKDIR}/t19_enc*.txt"))
+
+    r2 = run([sys.executable, DECODE, "--header", *pages, "-o", out])
+    assert r2.returncode == 0, r2.stderr
+    for path in pages:
+        assert f"== {path} ==" in r2.stdout
+    for n in range(len(pages)):
+        assert f"Seite:{' ' * 15}{n} (0-basiert) von {len(pages)}" in r2.stdout, r2.stdout
+    assert "Dateigroesse:        5000 Bytes" in r2.stdout
+    assert not glob.glob(f"{out}*"), "--header darf keine Ausgabedatei schreiben"
+    print(f" OK: {len(pages)} Header ausgegeben, keine Ausgabedatei geschrieben")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
@@ -615,4 +671,6 @@ if __name__ == "__main__":
     test_output_pattern_split()
     test_output_pattern_split_utf16le_boms()
     test_output_pattern_single_bom_without_star()
+    test_latin128_saved_as_latin1()
+    test_header_only()
     print("\nAlle End-to-End-Tests bestanden.")
