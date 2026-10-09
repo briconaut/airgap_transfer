@@ -32,8 +32,11 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256/512 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
 | `--parity-symbols` | Absolute Paritätssymbolzahl r, statt `--redundancy` |
-| `--lines` | Nutzdatenzeilen pro Seite (siehe "Seitenteilung" unten). Default: keine Seitenteilung |
+| `--lines` | Nutzdatenzeilen pro Seite (siehe "Seitenteilung" unten); mit `--columns` die Zeilen nach dem Aufteilen in Spalten, eine Seite fasst dann `--lines` × `--columns` Nutzdatenzeilen. Default: keine Seitenteilung |
+| `--columns` | Spaltenzahl pro Seite (Default 1). Die Nutzdatenzeilen jeder Seite werden spaltenweise verteilt (erst Spalte 1 von oben nach unten, dann Spalte 2, …), jede Spalte ist `--width` breit, Trenner ist ` ### `. Präambel und Header bleiben einspaltig. `decode.py` erkennt das Layout automatisch |
 | `--filename` | Im Header gespeicherter Name (Default: Basisname der Eingabedatei) |
+| `--no-scramble` | Nutzdaten nicht verwürfeln (siehe "Folgen gleicher Zeichen" unten). Default: verwürfelt |
+| `--show-preset <preset>` | Gibt alle Zeichen aus, die eine mit diesem Preset kodierte Datei enthalten kann (Header-Alphabet + Preset-Alphabet), als eine UTF-8-Zeile auf stdout, und beendet sich, ohne etwas zu kodieren. Gedacht für Tesseracts `tessedit_char_whitelist` |
 
 ### decode.py
 
@@ -45,7 +48,8 @@ python3 decode.py -o wiederhergestellt < ocr_output.txt
 | `--header` | Nur die Header aller Seiten jeder Eingabedatei ausgeben (nach stdout); Nutzdaten werden nicht verarbeitet, `-o` wird ignoriert |
 
 **Seitenteilung:** `encode.py --lines N` teilt die Nutzdaten in Seiten zu je
-N Zeilen auf. Jede Seite trägt eine **vollständige eigene Kopie** des
+N Zeilen auf (mit `--columns C` zu je N Zeilen à C Spalten, also N × C
+Nutzdatenzeilen). Jede Seite trägt eine **vollständige eigene Kopie** des
 Headers (inkl. 3-fach wiederholter Praeambel) plus vier zusätzliche Felder:
 Gesamtzahl der Seiten, Nummer dieser Seite, eine CRC32-Prüfsumme dieser
 Seite sowie eine zufällige, für alle Seiten einer Datei gemeinsame
@@ -160,13 +164,35 @@ pro Zeile werden repariert, ab 6 wird die Zeile als nicht korrigierbar
 verworfen (nie stillschweigend falsch decodiert — das ist getestet, siehe
 `test_rs_codec.py`).
 
+## Folgen gleicher Zeichen: Verwürfelung und Längenreparatur
+
+Der häufigste OCR-Fehler bei gut lesbaren Screenshots ist eine falsch
+gezählte Folge gleicher Zeichen (`qqqqqqqqqqqq`, `JJJJJJJJJJJJJJJJ`). Ein
+Zeichen zu viel oder zu wenig verschiebt den Rest der Zeile, sodass
+Reed-Solomon dutzende statt einem Fehler sieht. Zwei Gegenmaßnahmen:
+
+- **Verwürfelung (Encoder, Standard):** Die Datensymbole jeder Zeile werden
+  vor dem RS-Kodieren mit einem Pseudo-Zufallsstrom XOR-verknüpft
+  (SHAKE-256 aus Dokument-ID und Zeilennummer, siehe `lib/scramble.py`).
+  Dadurch entstehen auch bei komprimierten oder stark repetitiven Daten
+  keine langen Folgen mehr. Kostet keinen Platz; `--no-scramble` schaltet
+  sie ab (nur für Vergleiche/Debugging). Ab Formatversion 4; der Decoder
+  liest Version 3 (unverwürfelt) weiterhin.
+- **Längenreparatur (Decoder, immer aktiv):** Hat eine Zeile bis zu 2
+  Zeichen zu viel oder zu wenig (oder ist bei richtiger Länge nicht
+  korrigierbar), probiert der Decoder Varianten durch, in denen Folgen
+  gleicher Zeichen um ein Zeichen verlängert oder verkürzt sind. Akzeptiert
+  wird nur eine Variante, die RS dekodieren kann **und** deren CRC32 stimmt.
+  Gerettete Zeilen stehen im Fehlerbericht. Wirkt auch bei älteren
+  Version-3-Dateien.
+
 ## Format (Kurzfassung)
 
 ```
 Je Seite (mindestens 1 - ohne --lines besteht die ganze Datei aus einer Seite):
   Zeile 1:         Präambel (5 Zeichen, Header-Alphabet): Anzahl Header-Zeilen + Prüfsumme
   Zeilen 2..N:      Header, 3-fach wiederholt, je mit [Kopie-Idx][Zeilen-Idx][Inhalt]
-                    (Formatversion, Alphabet, Dokument-ID, Seitenzahl/-nummer/-prüfsumme,
+                    (Formatversion, Flags (verwürfelt), Alphabet, Dokument-ID, Seitenzahl/-nummer/-prüfsumme,
                     k, r, Dateigröße, SHA-256, Dateiname, ...)
   Zeilen N+1..Ende: Nutzdaten dieser Seite, je [Zeilennummer][CRC32][RS-Codewort(k+r)]
 (3 Leerzeilen zwischen den Seiten, Zeilennummern global über die ganze Datei)

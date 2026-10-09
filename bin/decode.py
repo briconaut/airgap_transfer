@@ -56,7 +56,9 @@ from header import (
 from rs_codec import GaloisField, rs_generator_poly
 from framing import (
     parse_payload_line, crc_width_for, reflow_joined_lines, byte_offset_of_line, LineStatus,
+    unarrange_columns,
 )
+from scramble import scramble_block
 
 
 def gather_input_paths(input_args):
@@ -112,7 +114,10 @@ def split_text_lines(text: str):
     # Binäres Lesen umgeht Pythons Universal-Newlines-Übersetzung (die ein
     # Text-mode open() automatisch macht) - von Hand nachholen, falls die
     # Quelle mit \r\n oder \r statt \n endet (z.B. unter Windows erzeugt).
-    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Ein mehrspaltiges Layout (encode.py --columns) wird dabei gleich wieder
+    # in eine einzige Zeilenfolge aufgeloest.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return unarrange_columns(lines)[0]
 
 
 def decode_header_text(raw: bytes):
@@ -218,6 +223,7 @@ def format_header(meta):
     enc = meta["text_encoding"]
     rows = [
         ("Formatversion", meta["version"]),
+        ("Verwuerfelt", "ja" if meta["scrambled"] else "nein"),
         ("Alphabet", alphabet),
         ("Text-Encoding", f"{_HEADER_ENCODING_NAMES.get(enc, 'unbekannt')} ({enc})"),
         ("Dokument-ID", meta["document_id"].hex()),
@@ -436,6 +442,7 @@ def main():
     # --- Vollstaendigen Symbolstrom rekonstruieren (Luecken = 0-Symbole) ----
     full_symbols = [0] * (total_lines * k)
     bad_lines = []  # (line_number, status, reason)
+    repaired_lines = []  # (line_number, beschreibung) - per Laengenreparatur gerettet
     first_bad_line = None
     for i in range(total_lines):
         res = results.get(i)
@@ -445,7 +452,12 @@ def main():
                 first_bad_line = i
             continue
         if res["status"] == LineStatus.OK:
-            full_symbols[i * k:(i + 1) * k] = res["data"]
+            data = res["data"]
+            if meta["scrambled"]:
+                data = scramble_block(data, i, meta["document_id"], bits_per_symbol)
+            full_symbols[i * k:(i + 1) * k] = data
+            if res["repaired"]:
+                repaired_lines.append((i, res["repaired"]))
         else:
             bad_lines.append((i, res["status"], res["reason"]))
             if first_bad_line is None:
@@ -480,6 +492,13 @@ def main():
         if actual_crc != p["meta"]["page_checksum"]:
             bad_pages.append((pn, "Seiten-Pruefsumme stimmt nicht (Seite vermutlich unvollstaendig/beschaedigt)"))
 
+    if repaired_lines:
+        print(
+            f"Hinweis: {len(repaired_lines)} Zeile(n) mit falsch gezaehlten Folgen gleicher Zeichen "
+            f"per Laengenreparatur gerettet (Details im Fehlerbericht).",
+            file=sys.stderr,
+        )
+
     if first_bad_line is None:
         # Alles sauber -> ein einziges vollstaendiges Ausgabefile.
         # Hash-Pruefung nur, wenn SHA-256 im Header nicht Null-Bytes sind
@@ -498,7 +517,7 @@ def main():
         write_report(args, status="vollstaendig", hash_checked=hash_checked, hash_ok=hash_ok,
                      bad_lines=[], parse_errors=parse_errors, total_lines=total_lines,
                      filename=meta["filename"], page_count=page_count,
-                     missing_pages=missing_pages, bad_pages=bad_pages)
+                     missing_pages=missing_pages, bad_pages=bad_pages, repaired_lines=repaired_lines)
         print(f"OK: vollstaendig rekonstruiert -> {args.output} (Hash-Pruefung: {hash_status})", file=sys.stderr)
     else:
         split_at = byte_offset_of_line(first_bad_line, k, bits_per_symbol)
@@ -512,7 +531,7 @@ def main():
         write_report(args, status="unvollstaendig (Hash-Pruefung uebersprungen)", hash_checked=False, hash_ok=None,
                      bad_lines=bad_lines, parse_errors=parse_errors, total_lines=total_lines,
                      filename=meta["filename"], page_count=page_count,
-                     missing_pages=missing_pages, bad_pages=bad_pages)
+                     missing_pages=missing_pages, bad_pages=bad_pages, repaired_lines=repaired_lines)
         page_note = f", {len(missing_pages)} Seite(n) komplett fehlend" if missing_pages else ""
         print(
             f"UNVOLLSTAENDIG: {len(bad_lines)} von {total_lines} Zeilen fehlerhaft/fehlend{page_note}.\n"
@@ -524,7 +543,7 @@ def main():
 
 
 def write_report(args, status, hash_checked, hash_ok, bad_lines, parse_errors, total_lines, filename,
-                  page_count, missing_pages, bad_pages):
+                  page_count, missing_pages, bad_pages, repaired_lines):
     ext = "json" if args.error_report_format == "json" else "txt"
     path = f"{args.output}.errors.{ext}"
     if args.error_report_format == "json":
@@ -534,6 +553,7 @@ def write_report(args, status, hash_checked, hash_ok, bad_lines, parse_errors, t
             page_count=page_count, missing_pages=missing_pages,
             bad_pages=[dict(page=pn, reason=reason) for pn, reason in bad_pages],
             bad_lines=[dict(line=ln, status=st, reason=reason) for ln, st, reason in bad_lines],
+            repaired_lines=[dict(line=ln, repair=desc) for ln, desc in repaired_lines],
             unparseable_lines=[dict(status=r["status"], reason=r["reason"]) for r in parse_errors],
         )
         with open(path, "w") as f:
@@ -557,6 +577,10 @@ def write_report(args, status, hash_checked, hash_ok, bad_lines, parse_errors, t
             f.write(f"\nFehlerhafte/fehlende Zeilen ({len(bad_lines)}):\n")
             for ln, st, reason in bad_lines:
                 f.write(f"  Zeile {ln}: {st} - {reason}\n")
+            if repaired_lines:
+                f.write(f"\nPer Laengenreparatur gerettete Zeilen ({len(repaired_lines)}):\n")
+                for ln, desc in repaired_lines:
+                    f.write(f"  Zeile {ln}: {desc}\n")
             if parse_errors:
                 f.write(f"\nNicht zuordenbare Zeilen ({len(parse_errors)}):\n")
                 for r in parse_errors:

@@ -13,7 +13,9 @@ Header-Koerper (3x wiederholt, jede Zeile mit Praefix):
     (bis zu 3) Kopien jeder Position, setzt den Header wieder zusammen.
 
 Header-Rohbytes (das, was bit-geslict wird):
-    magic:            1 Byte  (Formatversion, aktuell 3)
+    magic:            1 Byte  (Formatversion, aktuell 4; 3 wird weiterhin gelesen)
+    [ab Version 4] flags: 1 Byte (Bit 0 = Nutzdaten verwuerfelt, siehe scramble.py;
+                      Version 3 hat kein flags-Feld und gilt als unverwuerfelt)
     alphabet_mode:    1 Byte  (0 = Standard-Preset, 1 = Custom-Alphabet)
     [nur falls custom] alphabet_len: 2 Byte + alphabet_chars: alphabet_len Byte
     text_encoding:    1 Byte  (0 = UTF-8, 1 = UTF-16LE, 2 = UTF-32LE,
@@ -50,7 +52,9 @@ Seitenteilung (encode.py --lines):
 import struct
 from alphabets import Alphabet, HEADER_ALPHABET
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
+SUPPORTED_FORMAT_VERSIONS = (3, 4)  # 3 = ohne flags-Byte (nur Lesen)
+FLAG_SCRAMBLED = 0x01
 DOCUMENT_ID_WIDTH = 8  # Byte, siehe pack_header
 TEXT_ENCODING_UTF8 = 0
 TEXT_ENCODING_UTF16LE = 1
@@ -74,9 +78,10 @@ class HeaderError(ValueError):
 def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r: int,
                  total_file_size: int, sha256_digest: bytes, ln_width: int,
                  filename: str, document_id: bytes, page_count: int, page_number: int,
-                 page_checksum: int, text_encoding: int) -> bytes:
+                 page_checksum: int, text_encoding: int, scrambled: bool = False) -> bytes:
     out = bytearray()
     out.append(FORMAT_VERSION)
+    out.append(FLAG_SCRAMBLED if scrambled else 0)
     out.append(1 if is_custom_alphabet else 0)
     if is_custom_alphabet:
         # utf-8 statt ascii: ein Custom-Alphabet darf bewusst ueber 7-Bit-ASCII
@@ -121,11 +126,12 @@ def unpack_header(data: bytes) -> dict:
         return chunk
 
     version = take(1)[0]
-    if version != FORMAT_VERSION:
+    if version not in SUPPORTED_FORMAT_VERSIONS:
         raise HeaderError(
             f"Formatversion {version} wird von diesem Decoder nicht unterstuetzt "
-            f"(bekannt: {FORMAT_VERSION}) - harter Abbruch statt Best-Effort-Versuch."
+            f"(bekannt: {SUPPORTED_FORMAT_VERSIONS}) - harter Abbruch statt Best-Effort-Versuch."
         )
+    flags = take(1)[0] if version >= 4 else 0
     is_custom = take(1)[0] == 1
     alphabet_chars = None
     if is_custom:
@@ -145,7 +151,7 @@ def unpack_header(data: bytes) -> dict:
     filename = take(name_len).decode("utf-8") if name_len else ""
 
     return dict(
-        version=version, is_custom_alphabet=is_custom, alphabet_chars=alphabet_chars,
+        version=version, scrambled=bool(flags & FLAG_SCRAMBLED), is_custom_alphabet=is_custom, alphabet_chars=alphabet_chars,
         text_encoding=text_encoding,
         document_id=document_id, page_count=page_count, page_number=page_number,
         page_checksum=page_checksum,

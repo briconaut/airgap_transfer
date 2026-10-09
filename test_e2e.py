@@ -8,7 +8,7 @@ import hashlib
 # lib/ fuer den direkten Import (Alphabet wird in den Hilfsfunktionen benutzt)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from alphabets import Alphabet, DEFAULT_ALPHABET
-from header import find_preamble_positions
+from header import find_preamble_positions, parse_preamble, HEADER_COPIES
 
 # Pfade zu den Tools relativ zu diesem Skript
 ENCODE  = os.path.join(os.path.dirname(__file__), "bin", "encode.py")
@@ -653,6 +653,201 @@ def test_header_only():
     print(f" OK: {len(pages)} Header ausgegeben, keine Ausgabedatei geschrieben")
 
 
+def test_columns():
+    print("== Test 20: --columns verteilt jede Seite auf mehrere Spalten ==")
+    src = f"{WORKDIR}/t20_src.bin"
+    enc = f"{WORKDIR}/t20_enc.txt"
+    out = f"{WORKDIR}/t20_out"
+    make_test_file(src, 7_000)
+    with open(src, "rb") as f:
+        expected = f.read()
+
+    for columns, extra in [(2, []), (3, ["--lines", "17"]), (4, ["--preset", "utf16le128", "--lines", "10"])]:
+        r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "60", "--columns", str(columns), *extra])
+        assert r.returncode == 0, r.stderr
+        with open(enc, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-16") if "utf16le128" in extra else raw.decode("utf-8")
+        rows = [l for l in text.split("\n") if l.strip()]
+        assert max(l.count(" ### ") for l in rows) == columns - 1, f"{columns} Spalten erwartet"
+        assert all(len(l) <= columns * 60 + (columns - 1) * 5 for l in rows)
+
+        # Praeambel und Header bleiben einspaltig; --lines zaehlt die Zeilen
+        # nach dem Aufteilen in Spalten (Header nicht mitgezaehlt).
+        for page in text.lstrip("﻿").split("\n\n\n\n"):
+            page_rows = [l for l in page.split("\n") if l.strip()]
+            first_multi = next(i for i, l in enumerate(page_rows) if " ### " in l)
+            assert all(" ### " not in l for l in page_rows[:first_multi])
+            assert first_multi > 3, "Praeambel und Header erwartet"
+            if "--lines" in extra:
+                lines = int(extra[extra.index("--lines") + 1])
+                assert len(page_rows) - first_multi <= lines, f"mehr als {lines} Nutzdatenzeilen auf einer Seite"
+
+        r = run([sys.executable, DECODE, enc, "-o", out])
+        assert r.returncode == 0, r.stderr
+        with open(out, "rb") as f:
+            assert f.read() == expected, f"Roundtrip mit --columns {columns} fehlgeschlagen"
+    print(" OK: Roundtrip mit 2/3/4 Spalten (inkl. Seitenteilung und UTF-16LE)")
+
+
+def test_show_preset():
+    print("== Test 21: --show-preset gibt alle verwendeten Zeichen eines Presets aus ==")
+    src = f"{WORKDIR}/t21_src.bin"
+    enc = f"{WORKDIR}/t21_enc.txt"
+    make_test_file(src, 3_000)
+
+    for preset, codec in [("default", "utf-8"), ("latin128", "utf-8"), ("utf16le256", "utf-16"), ("utf32le512", "utf-32")]:
+        r = subprocess.run([sys.executable, ENCODE, "--show-preset", preset], capture_output=True)
+        assert r.returncode == 0, r.stderr
+        shown = r.stdout.decode("utf-8")
+        assert shown.endswith("\n") and shown.count("\n") == 1, "genau eine Zeile erwartet"
+        charset = shown[:-1]
+        assert len(set(charset)) == len(charset), "Zeichen doppelt ausgegeben"
+        assert set(DEFAULT_ALPHABET) <= set(charset), "Header-Alphabet fehlt"
+
+        r = run([sys.executable, ENCODE, src, "-o", enc, "--preset", preset, "--columns", "2", "--lines", "20"])
+        assert r.returncode == 0, r.stderr
+        with open(enc, "rb") as f:
+            text = f.read().decode(codec).lstrip("﻿")
+        unexpected = set(text) - set(charset) - {" ", "\n"}
+        assert not unexpected, f"{preset}: Zeichen fehlen in --show-preset: {sorted(unexpected)!r}"
+    print(" OK: --show-preset deckt alle Zeichen der kodierten Ausgabe ab")
+
+
+def payload_cells(text):
+    """Nutzdaten-Zeilen (ohne Praeambel/Header) eines einspaltigen encode.py-Outputs."""
+    lines = [l for l in text.split("\n") if l.strip()]
+    header_alpha = Alphabet(DEFAULT_ALPHABET)
+    start = find_preamble_positions(lines, header_alpha)[0]
+    n_header = HEADER_COPIES * parse_preamble(lines[start].strip(), header_alpha)
+    return lines[start + 1 + n_header:]
+
+
+def longest_run(s):
+    best = cur = 1
+    for a, b in zip(s, s[1:]):
+        cur = cur + 1 if a == b else 1
+        best = max(best, cur)
+    return best
+
+
+def test_scrambling():
+    print("== Test 22: Verwuerfelung bricht lange Folgen gleicher Zeichen auf ==")
+    src = f"{WORKDIR}/t22_src.bin"
+    enc = f"{WORKDIR}/t22_enc.txt"
+    out = f"{WORKDIR}/t22_out"
+    # stark repetitive Daten (wie bzip2-/Base64-Bloecke mit vielen gleichen Bytes)
+    expected = bytes(4_000) + b"A" * 3_000 + bytes(random.getrandbits(8) for _ in range(2_000))
+    with open(src, "wb") as f:
+        f.write(expected)
+
+    max_runs = {}
+    for flag in ([], ["--no-scramble"]):
+        r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", *flag])
+        assert r.returncode == 0, r.stderr
+        with open(enc, encoding="utf-8") as f:
+            cells = payload_cells(f.read())
+        max_runs[bool(flag)] = max(longest_run(c[10:]) for c in cells)
+
+        r = run([sys.executable, DECODE, enc, "--header"])
+        assert r.returncode == 0, r.stderr
+        assert f"Verwuerfelt:" in r.stdout and ("nein" if flag else "ja") in r.stdout.split("Verwuerfelt:")[1].split("\n")[0]
+
+        r = run([sys.executable, DECODE, enc, "-o", out])
+        assert r.returncode == 0, r.stderr
+        with open(out, "rb") as f:
+            assert f.read() == expected, f"Roundtrip {flag or 'verwuerfelt'} fehlgeschlagen"
+
+    print(f" laengste Folge: verwuerfelt {max_runs[False]}, unverwuerfelt {max_runs[True]}")
+    assert max_runs[True] >= 30, "Testdaten sollten ohne Verwuerfelung lange Folgen erzeugen"
+    assert max_runs[False] <= 6, "Verwuerfelung hat lange Folgen nicht aufgebrochen"
+    print(" OK: verwuerfelt ohne lange Folgen, beide Varianten exakt rekonstruiert")
+
+
+def _run_starts(s, start, min_len):
+    """Startindizes der Folgen gleicher Zeichen mit Laenge >= min_len ab `start`."""
+    out = []
+    i = start
+    while i < len(s):
+        j = i
+        while j < len(s) and s[j] == s[i]:
+            j += 1
+        if j - i >= min_len:
+            out.append(i)
+        i = j
+    return out
+
+
+def test_shift_repair():
+    print("== Test 23: Laengenreparatur bei falsch gezaehlten Folgen gleicher Zeichen ==")
+    src = f"{WORKDIR}/t23_src.bin"
+    enc = f"{WORKDIR}/t23_enc.txt"
+    shifted = f"{WORKDIR}/t23_shifted.txt"
+    out = f"{WORKDIR}/t23_out"
+    make_test_file(src, 15_000)
+
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "20"])
+    assert r.returncode == 0, r.stderr
+    with open(enc, encoding="utf-8") as f:
+        text = f.read()
+    cells = payload_cells(text)
+    prefix = 10  # Zeilennummer+CRC nie anfassen (wie in den anderen Tests)
+
+    # Zeilen mit zwei weit auseinanderliegenden Folgen >= 2 im Nutzdatenteil:
+    # Die Verschiebung muss deutlich mehr als floor(r/2) Zeichen betreffen,
+    # sonst korrigiert RS sie schon ohne Reparatur (dann gaebe es nichts zu testen).
+    def first_last(c):
+        runs = _run_starts(c, prefix, 2)
+        return runs[0], runs[-1]
+
+    def far_apart(c):
+        runs = _run_starts(c, prefix, 2)
+        return len(runs) >= 2 and runs[0] <= 30 and runs[-1] - runs[0] >= 20
+    candidates = [c for c in cells if far_apart(c)]
+    assert len(candidates) >= 5, "zu wenige Zeilen mit Folgen gleicher Zeichen"
+    picked = random.sample(candidates, 5)
+
+    def drop(s, pos):
+        return s[:pos] + s[pos + 1:]
+
+    def dup(s, pos):
+        return s[:pos] + s[pos] + s[pos:]
+
+    edits = {}
+    a, b = first_last(picked[0])
+    edits[picked[0]] = dup(picked[0], a)                    # eine Folge zu lang
+    a, b = first_last(picked[1])
+    edits[picked[1]] = drop(picked[1], a)                   # eine Folge zu kurz
+    a, b = first_last(picked[2])
+    edits[picked[2]] = drop(dup(picked[2], b), a)           # eine zu lang, eine zu kurz (gleiche Laenge)
+    a, b = first_last(picked[3])
+    edits[picked[3]] = dup(dup(picked[3], b), a)            # zwei Folgen zu lang
+    a, b = first_last(picked[4])
+    edits[picked[4]] = corrupt_symbols_in_line(drop(picked[4], a), 1, protect_prefix=prefix,
+                                               alphabet_chars=DEFAULT_ALPHABET)  # zu kurz + Symbolfehler
+
+    for orig, changed in edits.items():
+        assert text.count(orig) == 1
+        text = text.replace(orig, changed)
+    with open(shifted, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    for stale in (f"{out}.part1", f"{out}.part2"):  # Reste frueherer Laeufe
+        if os.path.exists(stale):
+            os.remove(stale)
+    r = run([sys.executable, DECODE, shifted, "-o", out])
+    assert r.returncode == 0, r.stderr
+    print(" decode stderr:", r.stderr.strip())
+    assert "Laengenreparatur" in r.stderr, "Kein Hinweis auf Laengenreparatur im stderr"
+    assert not os.path.exists(f"{out}.part1"), "Datei sollte trotz Verschiebungen vollstaendig rekonstruiert werden"
+    with open(f"{out}.errors.txt") as f:
+        report = f.read()
+    assert "Per Laengenreparatur gerettete Zeilen (5)" in report, report
+    with open(src, "rb") as f:
+        assert f.read() == open(out, "rb").read(), "Nach Laengenreparatur stimmt die Datei nicht ueberein!"
+    print(" OK: 5 verschobene Zeilen repariert, Datei exakt rekonstruiert")
+
+
 if __name__ == "__main__":
     test_clean_roundtrip()
     test_correctable_corruption()
@@ -673,4 +868,8 @@ if __name__ == "__main__":
     test_output_pattern_single_bom_without_star()
     test_latin128_saved_as_latin1()
     test_header_only()
+    test_columns()
+    test_show_preset()
+    test_scrambling()
+    test_shift_repair()
     print("\nAlle End-to-End-Tests bestanden.")

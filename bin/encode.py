@@ -21,7 +21,7 @@ import zlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from alphabets import (
-    Alphabet, DEFAULT_ALPHABET, make_alphabet, PRESET_NAMES,
+    Alphabet, DEFAULT_ALPHABET, make_alphabet, PRESET_NAMES, PRESETS,
     ENCODING_UTF8, ENCODING_UTF16LE, ENCODING_UTF32LE, ENCODING_UTF32BE,
 )
 from header import (
@@ -29,8 +29,9 @@ from header import (
     TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE, TEXT_ENCODING_UTF32LE, TEXT_ENCODING_UTF32BE,
 )
 from rs_codec import GaloisField, rs_generator_poly, rs_encode
-from framing import compute_layout, build_payload_line, crc_width_for, byte_offset_of_line
+from framing import compute_layout, build_payload_line, crc_width_for, byte_offset_of_line, arrange_columns
 from progress import ProgressBar
+from scramble import scramble_block
 
 
 def main():
@@ -88,7 +89,8 @@ def main():
     ap.add_argument(
         "--lines", type=int, default=None,
         help=(
-            "Nutzdatenzeilen pro Seite. Jede Seite bekommt ihren eigenen, vollstaendigen "
+            "Nutzdatenzeilen pro Seite; mit --columns die Zeilen NACH dem Aufteilen "
+            "in Spalten (eine Seite fasst dann --lines x --columns Nutzdatenzeilen). Jede Seite bekommt ihren eigenen, vollstaendigen "
             "Header (inkl. Praeambel, 3-fach wiederholt) sowie Seitenzahl/-nummer, eine "
             "Pruefsumme dieser Seite und eine gemeinsame Dokument-ID. Ohne '*' im "
             "Dateinamen (siehe -o/--output) werden alle Seiten im selben Textstrom "
@@ -96,14 +98,51 @@ def main():
             "Default: keine Seitenteilung (eine einzige Seite fuer die gesamte Datei)."
         ),
     )
+    ap.add_argument(
+        "--columns", type=int, default=1,
+        help=(
+            "Anzahl Spalten, auf die die Nutzdatenzeilen jeder Seite verteilt werden "
+            "(spaltenweise: erst Spalte 1 von oben nach unten, dann Spalte 2, ...), "
+            "getrennt durch ' ### '. Praeambel und Header bleiben einspaltig. "
+            "Die Breite jeder Spalte entspricht --width. decode.py erkennt das "
+            "Spaltenlayout automatisch. Default: 1"
+        ),
+    )
     ap.add_argument("--filename", help="Im Header gespeicherter Dateiname (Default: Basisname der Eingabedatei, falls vorhanden)")
     ap.add_argument("--progress", action="store_true", help="Fortschrittsbalken auf stderr anzeigen")
+    ap.add_argument(
+        "--no-scramble", action="store_true",
+        help=(
+            "Nutzdaten NICHT verwuerfeln. Standardmaessig werden die Datensymbole "
+            "jeder Zeile mit einem aus der Dokument-ID abgeleiteten Pseudo-Zufallsstrom "
+            "XOR-verknuepft, damit keine langen Folgen gleicher Zeichen entstehen "
+            "(die OCR haeufig falsch zaehlt). Nur fuer Vergleiche/Debugging."
+        ),
+    )
+    ap.add_argument(
+        "--show-preset", choices=PRESET_NAMES, metavar="PRESET",
+        help=(
+            "Gibt alle Zeichen, die eine mit diesem Preset kodierte Datei enthalten kann "
+            "(Header-Alphabet + Nutzdaten-Alphabet), als eine Zeile UTF-8 auf stdout aus "
+            "- z.B. fuer Tesseracts tessedit_char_whitelist - und beendet sich ohne zu kodieren."
+        ),
+    )
     args = ap.parse_args()
+
+    if args.show_preset:
+        # Praeambel, Header, Zeilennummern und CRC nutzen immer das Header-
+        # Alphabet (inkl. '#' des Spaltentrenners), die Nutzdaten das Preset.
+        chars = dict.fromkeys(DEFAULT_ALPHABET + PRESETS[args.show_preset].chars)
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+        print("".join(chars))
+        return
 
     if args.redundancy is not None and args.parity_symbols is not None:
         ap.error("--redundancy und --parity-symbols schliessen sich gegenseitig aus")
     if args.lines is not None and args.lines < 1:
         ap.error("--lines muss >= 1 sein")
+    if args.columns < 1:
+        ap.error("--columns muss >= 1 sein")
 
     # --- Eingabe lesen -----------------------------------------------------
     if args.input:
@@ -161,10 +200,17 @@ def main():
     if len(data_symbols) < padded_len:
         data_symbols = data_symbols + [0] * (padded_len - len(data_symbols))
 
+    # Dokument-ID schon hier, da sie den Verwuerfelungs-Schluesselstrom bestimmt
+    document_id = os.urandom(8)
+    scrambled = not args.no_scramble
+    bits_per_symbol = payload_alpha.bits_per_symbol
+
     payload_lines = []
     bar = ProgressBar(total=total_lines, enabled=args.progress, label="Encoding")
     for i in range(total_lines):
         block = data_symbols[i * k:(i + 1) * k]
+        if scrambled:
+            block = scramble_block(block, i, document_id, bits_per_symbol)
         payload_lines.append(
             build_payload_line(i, block, k, r, gen, gf, layout["ln_width"], layout["crc_width"], payload_alpha, header_alpha)
         )
@@ -173,10 +219,10 @@ def main():
 
     # --- Seiten aufteilen und Header bauen -----------------------------------
     sha256 = hashlib.sha256(data).digest()
-    bits_per_symbol = payload_alpha.bits_per_symbol
-    lines_per_page = args.lines or total_lines
+    # --lines zaehlt die Zeilen nach dem Aufteilen in Spalten -> eine Seite
+    # fasst --lines x --columns Nutzdatenzeilen.
+    lines_per_page = args.lines * args.columns if args.lines else total_lines
     page_count = max(1, math.ceil(total_lines / lines_per_page))
-    document_id = os.urandom(8)
 
     if page_count > 1:
         print(f"Seitenteilung: {page_count} Seiten zu je bis zu {lines_per_page} Nutzdatenzeilen.", file=sys.stderr)
@@ -192,7 +238,7 @@ def main():
         header_bytes = pack_header(
             payload_alpha, is_custom, k, r, len(data), sha256, layout["ln_width"], filename,
             document_id=document_id, page_count=page_count, page_number=page_number,
-            page_checksum=page_checksum, text_encoding=text_encoding,
+            page_checksum=page_checksum, text_encoding=text_encoding, scrambled=scrambled,
         )
         preamble, header_lines = build_header_lines(header_bytes, args.width, header_alpha)
         pages.append((preamble, header_lines, payload_lines[start:end]))
@@ -209,13 +255,18 @@ def main():
     out_encoding = out_codec
     needs_bom = out_codec != ENCODING_UTF8
 
+    # Einheitliche Spaltenbreite ueber alle Seiten (Nutzdatenzeilen koennen
+    # wegen der RS-Obergrenze schmaler als --width sein, siehe "capped").
+    # Praeambel und Header bleiben einspaltig und zaehlen hier nicht mit.
+    col_width = max(len(line) for _, _, page_payload_lines in pages for line in page_payload_lines)
+
     def write_page(out, preamble, header_lines, page_payload_lines, write_bom):
         if write_bom:
             out.write(chr(0xFEFF))  # BOM; chr() statt Literal, um jedes Transkriptionsrisiko auszuschliessen
         out.write(preamble + "\n")
         for line in header_lines:
             out.write(line + "\n")
-        for line in page_payload_lines:
+        for line in arrange_columns(page_payload_lines, args.columns, col_width):
             out.write(line + "\n")
 
     if args.output and "*" in args.output:
