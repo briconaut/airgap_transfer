@@ -32,7 +32,15 @@ def main():
             "einem einzigen Textstrom mit allen Seiten hintereinander."
         ),
     )
-    ap.add_argument("--width", type=int, default=100, help="Gesamte Zeilenbreite inkl. aller Felder (Default: 100)")
+    ap.add_argument(
+        "--width", type=int, default=100,
+        help=(
+            "Breite einer Nutzdatenzeile in Zeichen inkl. Zeilennummer und Pruefsumme "
+            "(Default: 100). Wird unabhaengig vom Alphabet ausgenutzt: passt ein "
+            "einzelnes RS-Codewort nicht hinein, werden mehrere verschraenkt. Mit "
+            "--columns die Breite JEDER Spalte."
+        ),
+    )
     alpha_group = ap.add_mutually_exclusive_group()
     alpha_group.add_argument(
         "--preset", choices=PRESET_NAMES, default="default",
@@ -145,22 +153,15 @@ def main():
 
     header_alpha = Alphabet(DEFAULT_ALPHABET)
     try:
-        payload_alpha, is_custom, out_codec = make_alphabet(preset=args.preset, custom_chars=args.alphabet)
+        payload_alpha, preset, out_codec = make_alphabet(preset=args.preset, custom_chars=args.alphabet)
         layout = plan_layout(data, args.width, payload_alpha, header_alpha, args.redundancy, args.parity_symbols)
     except ValueError as e:
         ap.error(str(e))
 
-    if layout.capped:
-        print(
-            f"Hinweis: --width {args.width} konnte wegen der RS-Codewort-Obergrenze "
-            f"({payload_alpha.size - 1} Symbole bei {payload_alpha.size}-Symbol-Alphabet) "
-            f"nicht voll ausgenutzt werden. Tatsaechliche Zeilenbreite: {layout.effective_width}.",
-            file=sys.stderr,
-        )
     print(
-        f"Layout: k={layout.k} Nutzdatensymbole, r={layout.r} Paritaetssymbole "
-        f"(korrigiert bis zu {layout.r // 2} Fehler/Zeile), "
-        f"{layout.total_lines} Nutzdatenzeilen.",
+        f"Layout: Zeilenbreite {layout.effective_width}, je Zeile {layout.interleave} verschraenkte(s) "
+        f"Codewort/Codewoerter mit k={layout.k} Nutzdaten- und r={layout.r} Paritaetssymbolen "
+        f"(korrigiert bis zu {layout.r // 2} Fehler je Codewort), {layout.total_lines} Nutzdatenzeilen.",
         file=sys.stderr,
     )
 
@@ -174,9 +175,10 @@ def main():
         print(f"Seitenteilung: {page_count} Seiten zu je bis zu {lines_per_page} Nutzdatenzeilen.", file=sys.stderr)
 
     pages = encode_document(
-        data, layout, args.width, payload_alpha, header_alpha, is_custom,
+        data, layout, payload_alpha, header_alpha, preset,
         text_encoding=CODEC_TO_TEXT_ENCODING[out_codec], filename=filename,
-        scrambled=not args.no_scramble, lines_per_page=lines_per_page, progress=args.progress,
+        scrambled=not args.no_scramble, lines_per_page=lines_per_page, columns=args.columns,
+        progress=args.progress,
     )
 
     # --- Ausgabe -------------------------------------------------------------
@@ -190,7 +192,7 @@ def main():
     needs_bom = out_codec != ENCODING_UTF8
 
     # Einheitliche Spaltenbreite ueber alle Seiten (Nutzdatenzeilen koennen
-    # wegen der RS-Obergrenze schmaler als --width sein, siehe "capped").
+    # etwas schmaler als --width sein, siehe Layout.effective_width).
     col_width = layout.effective_width
 
     if args.output and "*" in args.output:

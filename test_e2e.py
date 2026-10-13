@@ -1002,6 +1002,83 @@ def test_archive2git():
     print(" OK: Import als neuer Commit, Hardlink aufgeloest, Fehler sauber gemeldet")
 
 
+def _encode_lines(src, enc, *opts):
+    r = run([sys.executable, ENCODE, src, "-o", enc, *opts])
+    assert r.returncode == 0, r.stderr
+    with open(enc, encoding="utf-8") as f:
+        return f.read().split("\n"), r.stderr
+
+
+def test_interleave_full_width():
+    print("== Test 31: volle Zeilenbreite durch verschraenkte Codewoerter ==")
+    src, enc, out = f"{WORKDIR}/t31_src.bin", f"{WORKDIR}/t31_enc.txt", f"{WORKDIR}/t31_out"
+    make_test_file(src, 20_000)
+    lines, stderr = _encode_lines(src, enc, "--width", "200")
+    idx = payload_line_indices(lines)
+    assert {len(lines[i]) for i in idx} == {200}, "Nutzdatenzeilen muessen --width voll ausnutzen"
+    assert "je Zeile 4 verschraenkte" in stderr, stderr
+    r_val = int(stderr.split("r=")[1].split(" ")[0])
+    # Bloecke aufeinanderfolgender Lesefehler: 2*(r/2) Zeichen am Stueck
+    # wuerden ein einzelnes Codewort ueberfordern, verteilt auf 4 Codewoerter
+    # aber korrigierbar
+    burst = 2 * (r_val // 2)
+    for i in idx[3:10]:
+        line = list(lines[i])
+        for j in range(20, 20 + burst):
+            line[j] = DEFAULT_ALPHABET[(DEFAULT_ALPHABET.index(line[j]) + 1) % 64]
+        lines[i] = "".join(line)
+    with open(enc, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    r = run([sys.executable, DECODE, enc, "-o", out])
+    assert r.returncode == 0, r.stderr
+    with open(src, "rb") as f, open(out, "rb") as g:
+        assert f.read() == g.read()
+    print(f" OK: 200 Zeichen breit, Fehlerbloecke von {burst} Zeichen korrigiert")
+
+
+def test_interleave_shift_repair():
+    print("== Test 32: Laengenreparatur bei verschraenkten Codewoertern ==")
+    src, enc, out = f"{WORKDIR}/t32_src.bin", f"{WORKDIR}/t32_enc.txt", f"{WORKDIR}/t32_out"
+    with open(src, "wb") as f:
+        f.write(b"\x00" * 6_000)  # mit --no-scramble: lange Folgen gleicher Zeichen
+    lines, _ = _encode_lines(src, enc, "--width", "220", "--no-scramble")
+    i = payload_line_indices(lines)[2]
+    run_start = lines[i].index("222", 20)  # innerhalb der Nutzdaten eine Folge um 1 verkuerzen
+    lines[i] = lines[i][:run_start] + lines[i][run_start + 1:]
+    with open(enc, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    r = run([sys.executable, DECODE, enc, "-o", out])
+    assert r.returncode == 0 and "Laengenreparatur" in r.stderr, r.stderr
+    with open(src, "rb") as f, open(out, "rb") as g:
+        assert f.read() == g.read()
+    print(" OK: verkuerzte Folge in verschraenkter Zeile repariert")
+
+
+def test_compact_preset_header():
+    print("== Test 33: Preset als Kennung im Header, Header ueber volle Breite ==")
+    src, enc = f"{WORKDIR}/t33_src.bin", f"{WORKDIR}/t33_enc.txt"
+    make_test_file(src, 3_000)
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--preset", "utf32le512"])
+    assert r.returncode == 0, r.stderr
+    with open(enc, encoding="utf-32-le") as f:
+        lines = f.read().lstrip("\ufeff").split("\n")
+    n = parse_preamble(lines[0], Alphabet(DEFAULT_ALPHABET))
+    # bis Formatversion 5 stand das ganze 512er-Alphabet im Header (~30 Zeilen je Kopie)
+    assert n <= 2, f"Header sollte hoechstens 2 Zeilen je Kopie belegen, nicht {n}"
+    r = run([sys.executable, DECODE, "--header", enc])
+    assert r.returncode == 0 and "Preset 'utf32le512'" in r.stdout and "UTF-32LE" in r.stdout, r.stdout
+
+    # Mit Spalten darf der Header die volle Bildschirmzeile nutzen: ein langer
+    # Dateiname passt dann in eine einzige Header-Zeile je Kopie.
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "60", "--columns", "4",
+             "--filename", "x" * 120])
+    assert r.returncode == 0, r.stderr
+    with open(enc, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    assert parse_preamble(lines[0], Alphabet(DEFAULT_ALPHABET)) == 1
+    print(" OK: kompakter Header, Preset-Name und Encoding in --header sichtbar")
+
+
 def load_tests(loader, tests, pattern):
     """unittest-Einstieg: jede test_*-Funktion als eigener Testfall, in
     Definitionsreihenfolge (pytest sammelt die Funktionen direkt)."""

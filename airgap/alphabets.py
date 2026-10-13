@@ -197,6 +197,24 @@ PRESETS = {
 
 PRESET_NAMES = list(PRESETS)
 
+# Stabile Kennungen fuer den Header (ab Formatversion 6 wird bei Presets nur
+# diese Kennung gespeichert, nicht mehr das ganze Alphabet). Werte NIE aendern
+# oder wiederverwenden - nur neue anhaengen, sonst werden alte Dateien falsch
+# gelesen. 'default' hat eine eigene Kennung im alphabet_mode-Feld.
+PRESET_IDS = {
+    "ascii64": 1,
+    "latin128": 2,
+    "utf8128": 3,
+    "utf16le128": 4,
+    "utf16le256": 5,
+    "utf32le128": 6,
+    "utf32le256": 7,
+    "utf32le512": 8,
+    "utf32be512": 9,
+}
+PRESETS_BY_ID = {pid: name for name, pid in PRESET_IDS.items()}
+assert set(PRESET_IDS) == set(PRESETS) - {"default"}, "jedes Preset braucht eine Header-Kennung"
+
 
 class Alphabet:
     """Kapselt ein Alphabet: Zeichen <-> Symbolwert (Index) + Bit-Slicing."""
@@ -278,14 +296,14 @@ class Alphabet:
 
 
 def make_alphabet(preset: str | None = None,
-                  custom_chars: str | None = None) -> tuple["Alphabet", bool, str]:
-    """Gibt (Alphabet, is_custom, text_encoding) zurueck. text_encoding ist
-    eines der ENCODING_*-Konstanten oben (Python-Codec-Name der Ausgabedatei).
+                  custom_chars: str | None = None) -> tuple["Alphabet", str | None, str]:
+    """Gibt (Alphabet, preset_name, text_encoding) zurueck. preset_name ist
+    None fuer ein Custom-Alphabet. text_encoding ist eine der ENCODING_*-
+    Konstanten oben (Python-Codec-Name der Ausgabedatei).
 
-    is_custom=False nur fuer das 'default'-Preset (Alphabet-Zeichen werden dann
-    NICHT im Header gespeichert, weil decode.py das Default kennt). Alle anderen
-    Presets und Custom-Strings setzen is_custom=True und speichern die Zeichen
-    im Header, damit decode.py sie ohne zusaetzliche Parameter rekonstruieren kann.
+    Im Header landet bei Presets nur deren Kennung (siehe PRESET_IDS), bei
+    Custom-Alphabeten die vollstaendige Zeichenfolge - decode.py kann die
+    Nutzdaten so ohne zusaetzliche Parameter lesen.
 
     text_encoding != ENCODING_UTF8 nur fuer utf16le128/utf16le256/utf32le128/
     utf32le256/utf32le512/utf32be512 - Custom-Alphabete sind immer UTF-8 (kein
@@ -294,11 +312,11 @@ def make_alphabet(preset: str | None = None,
     Rangfolge: custom_chars > preset > 'default'.
     """
     if custom_chars is not None:
-        return Alphabet(custom_chars), True, ENCODING_UTF8
+        return Alphabet(custom_chars), None, ENCODING_UTF8
     name = preset or "default"
     if name not in PRESETS:
         raise ValueError(
             f"Unbekanntes Preset {name!r}. Gueltig: {PRESET_NAMES}"
         )
     p = PRESETS[name]
-    return Alphabet(p.chars), (name != "default"), p.text_encoding
+    return Alphabet(p.chars), name, p.text_encoding

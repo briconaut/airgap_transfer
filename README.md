@@ -40,13 +40,13 @@ aus dem Projektverzeichnis.
 |---|---|
 | `input` | Eingabedatei (optional, sonst stdin) |
 | `-o/--output` | Ausgabedatei (optional, sonst stdout). Enthält ein `*`, siehe "Seitenteilung" unten |
-| `--width` | Gesamte Zeilenbreite **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100) |
+| `--width` | Breite einer Nutzdatenzeile in Zeichen **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100). Wird unabhängig vom Alphabet voll ausgenutzt (siehe "Zeilenbreite" unten); mit `--columns` die Breite jeder Spalte |
 | `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128), `utf16le128`/`utf16le256`/`utf32le128`/`utf32le256`/`utf32le512`/`utf32be512` (siehe "UTF-16LE-/UTF-32-Presets" unten). Schließt `--alphabet` aus |
 | `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256/512 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
-| `--parity-symbols` | Absolute Paritätssymbolzahl r, statt `--redundancy` |
+| `--parity-symbols` | Absolute Zahl Paritätssymbole je Zeile, statt `--redundancy` (wird aufgerundet gleichmäßig auf die Codewörter der Zeile verteilt) |
 | `--lines` | Nutzdatenzeilen pro Seite (siehe "Seitenteilung" unten); mit `--columns` die Zeilen nach dem Aufteilen in Spalten, eine Seite fasst dann `--lines` × `--columns` Nutzdatenzeilen. Default: keine Seitenteilung |
-| `--columns` | Spaltenzahl pro Seite (Default 1). Die Nutzdatenzeilen jeder Seite werden spaltenweise verteilt (erst Spalte 1 von oben nach unten, dann Spalte 2, …), jede Spalte ist so breit wie eine Nutzdatenzeile (höchstens `--width`), Trenner ist ` ### `. Präambel und Header bleiben einspaltig. `decode.py` erkennt das Layout automatisch |
+| `--columns` | Spaltenzahl pro Seite (Default 1). Die Nutzdatenzeilen jeder Seite werden spaltenweise verteilt (erst Spalte 1 von oben nach unten, dann Spalte 2, …), jede Spalte ist so breit wie eine Nutzdatenzeile (höchstens `--width`), Trenner ist ` ### `. Präambel und Header bleiben einspaltig, nutzen aber die volle Breite aller Spalten. `decode.py` erkennt das Layout automatisch |
 | `--filename` | Im Header gespeicherter Name (Default: Basisname der Eingabedatei) |
 | `--no-scramble` | Nutzdaten nicht verwürfeln (siehe "Folgen gleicher Zeichen" unten). Default: verwürfelt |
 | `--progress` | Fortschrittsbalken auf stderr anzeigen |
@@ -227,14 +227,35 @@ Nutzdatenbereich ab; verschmilzt ausgerechnet die (sehr kurze) Präambel/
 Header-Zeile mit einer Nachbarzeile, gilt weiterhin das bestehende
 Restrisiko für den Header-Bereich (siehe unten).
 
+## Zeilenbreite: mehrere verschränkte Codewörter je Zeile
+
+Ein Reed-Solomon-Codewort kann höchstens so viele Zeichen lang sein wie das
+Alphabet Zeichen hat, minus eins (64er-Alphabet: 63). Ist `--width` größer,
+legt `encode.py` mehrere Codewörter in eine Zeile und **verschränkt** sie
+zeichenweise: Zeichen 1, 5, 9, … gehören zu Codewort 1, Zeichen 2, 6, 10, …
+zu Codewort 2 usw. (bei 4 Codewörtern). Das bringt:
+
+- `--width` wird mit jedem Alphabet voll ausgenutzt (bis Formatversion 5 war
+  die Zeile beim Standard-Alphabet auf 71 Zeichen begrenzt).
+- Zeilennummer und CRC (zusammen ca. 8 Zeichen) fallen nur einmal je Zeile
+  an — bei breiten Zeilen ein kleinerer Anteil.
+- Mehrere falsch gelesene Zeichen direkt hintereinander verteilen sich auf
+  verschiedene Codewörter und bleiben dadurch eher korrigierbar.
+
+`encode.py` meldet das gewählte Layout auf stderr, `decode.py --header` zeigt
+es unter "Codewoerter/Zeile". Ist eine breite Zeile bei der Darstellung zu
+lang für das Terminal, bricht dieses sie um — die Breite muss also zum
+Terminal passen (`tput cols` bzw. `$COLUMNS` liefert die verfügbare Breite).
+
 ## Wichtiger Fakt zur Fehlerkorrektur
 
 **r Paritätssymbole korrigieren nicht r Fehler, sondern nur `floor(r/2)`
-Fehler pro Zeile** (Reed-Solomon ohne bekannte Fehlerpositionen). Bei
+Fehler pro Codewort** (Reed-Solomon ohne bekannte Fehlerpositionen). Bei
 `--redundancy 20` und z. B. k=50/r=10 heißt das: bis zu 5 verfälschte Zeichen
-pro Zeile werden repariert, ab 6 wird die Zeile als nicht korrigierbar
+je Codewort werden repariert, ab 6 wird die Zeile als nicht korrigierbar
 verworfen (nie stillschweigend falsch decodiert — das ist getestet, siehe
-`test_rs_codec.py`).
+`test_rs_codec.py`). Bei mehreren Codewörtern je Zeile gilt die Grenze für
+jedes Codewort einzeln; `encode.py` meldet k und r je Codewort.
 
 ## Folgen gleicher Zeichen: Verwürfelung und Längenreparatur
 
@@ -249,10 +270,11 @@ Reed-Solomon dutzende statt einem Fehler sieht. Zwei Gegenmaßnahmen:
   Dadurch entstehen auch bei komprimierten oder stark repetitiven Daten
   keine langen Folgen mehr. Kostet keinen Platz; `--no-scramble` schaltet
   sie ab (nur für Vergleiche/Debugging). Ab Formatversion 4; der Decoder
-  liest Version 3 (unverwürfelt) weiterhin. Formatversion 5 (aktuell)
-  erweitert das Zeilen-CRC bei den 512er-Presets auf das volle 9-Bit-Symbol;
-  für alle anderen Alphabete sind Version 4 und 5 bit-identisch, ältere
-  Dateien bleiben lesbar.
+  liest Version 3 (unverwürfelt) weiterhin. Formatversion 5 erweitert das
+  Zeilen-CRC bei den 512er-Presets auf das volle 9-Bit-Symbol, Formatversion
+  6 (aktuell) bringt die verschränkten Codewörter (siehe "Zeilenbreite") und
+  speichert Presets als Kennung statt mit allen Zeichen. Dateien aller
+  älteren Versionen bleiben lesbar.
 - **Längenreparatur (Decoder, immer aktiv):** Hat eine Zeile bis zu 2
   Zeichen zu viel oder zu wenig (oder ist bei richtiger Länge nicht
   korrigierbar), probiert der Decoder Varianten durch, in denen Folgen
@@ -266,15 +288,25 @@ Reed-Solomon dutzende statt einem Fehler sieht. Zwei Gegenmaßnahmen:
 ```
 Je Seite (mindestens 1 - ohne --lines besteht die ganze Datei aus einer Seite):
   Zeile 1:         Präambel (5 Zeichen, Header-Alphabet): Anzahl Header-Zeilen + Prüfsumme
-  Zeilen 2..N:      Header, 3-fach wiederholt, je mit [Kopie-Idx][Zeilen-Idx][Inhalt]
-                    (Formatversion, Flags (verwürfelt), Alphabet, Dokument-ID, Seitenzahl/-nummer/-prüfsumme,
-                    k, r, Dateigröße, SHA-256, Dateiname, ...)
-  Zeilen N+1..Ende: Nutzdaten dieser Seite, je [Zeilennummer][CRC32][RS-Codewort(k+r)]
+  Zeilen 2..N:      Header, 3-fach wiederholt, je mit [Kopie-Idx][Zeilen-Idx][Inhalt],
+                    so breit wie eine Bildschirmzeile (alle Spalten)
+                    (Formatversion, Flags (verwürfelt), Alphabet bzw. Preset, Text-Encoding,
+                    Dokument-ID, Seitenzahl/-nummer/-prüfsumme, k, r, Codewörter je Zeile,
+                    Dateigröße, SHA-256, Dateiname, ...)
+  Zeilen N+1..Ende: Nutzdaten dieser Seite, je [Zeilennummer][CRC32][n verschränkte RS-Codewörter(k+r)]
 (3 Leerzeilen zwischen den Seiten, Zeilennummern global über die ganze Datei)
 ```
 
 Header- und Zeilennummer-/CRC-Felder stehen **immer** im festen 64-Symbol-
 Header-Alphabet, unabhängig vom für die Nutzdaten gewählten Alphabet.
+
+Der Header beschreibt vollständig, wie die Nutzdaten zu lesen sind: das
+**Nutzdaten-Alphabet** (bei Presets als Kennung, bei `--alphabet` mit allen
+Zeichen), das **Text-Encoding der Ausgabedatei** (UTF-8, UTF-16LE, UTF-32LE
+oder UTF-32BE) sowie k, r und die Zahl der Codewörter je Zeile. `decode.py`
+braucht deshalb keine Parameter dazu; `decode.py --header` zeigt alle Felder
+lesbar an. Das Encoding der *Originaldatei* spielt keine Rolle: übertragen
+werden ihre Bytes, unverändert.
 
 ## Bekannte, bewusst akzeptierte Restrisiken
 
@@ -318,8 +350,10 @@ einzelnen Kern: rund **3 Sekunden pro MB** für Encode und ebenso für Decode
 wächst linear mit der Dateigröße; für 300 MB sind also etwa 15 Minuten je
 Richtung zu erwarten. Mehr Parität (`--redundancy`) und viele beschädigte
 Zeilen (Längenreparatur probiert zahlreiche Varianten durch) verlängern vor
-allem das Decodieren. Vor dem produktiven Einsatz mit dreistelligen MB
-empfiehlt sich ein eigener Testlauf mit repräsentativer Dateigröße.
+allem das Decodieren: Eine nicht zu rettende Zeile mit 300 Zeichen kostet
+etwa 0,3 Sekunden, bei kurzen Zeilen deutlich weniger. Vor dem
+produktiven Einsatz mit dreistelligen MB empfiehlt sich ein eigener Testlauf
+mit repräsentativer Dateigröße.
 
 ## Tests
 

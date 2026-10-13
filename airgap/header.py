@@ -13,11 +13,13 @@ Header-Koerper (3x wiederholt, jede Zeile mit Praefix):
     (bis zu 3) Kopien jeder Position, setzt den Header wieder zusammen.
 
 Header-Rohbytes (das, was bit-geslict wird):
-    magic:            1 Byte  (Formatversion, aktuell 5; 3 und 4 werden weiterhin gelesen)
+    magic:            1 Byte  (Formatversion, aktuell 6; 3 bis 5 werden weiterhin gelesen)
     [ab Version 4] flags: 1 Byte (Bit 0 = Nutzdaten verwuerfelt, siehe scramble.py;
                       Version 3 hat kein flags-Feld und gilt als unverwuerfelt)
-    alphabet_mode:    1 Byte  (0 = Standard-Preset, 1 = Custom-Alphabet)
-    [nur falls custom] alphabet_len: 2 Byte + alphabet_chars: alphabet_len Byte
+    alphabet_mode:    1 Byte  (0 = Preset 'default', 1 = Custom-Alphabet,
+                      2 = anderes Preset [ab Version 6])
+    [mode 1]          alphabet_len: 2 Byte + alphabet_chars: alphabet_len Byte (UTF-8)
+    [mode 2]          preset_id: 1 Byte (siehe alphabets.PRESET_IDS)
     text_encoding:    1 Byte  (0 = UTF-8, 1 = UTF-16LE, 2 = UTF-32LE,
                       3 = UTF-32BE - Encoding der AUSGABEDATEI selbst, siehe
                       utf16le128/utf16le256/utf32le128/utf32le256/utf32le512/
@@ -31,8 +33,10 @@ Header-Rohbytes (das, was bit-geslict wird):
     page_number:      2 Byte (uint16, big-endian) - Nummer dieser Seite (0-basiert)
     page_checksum:    4 Byte (uint32, big-endian) - CRC32 ueber den Byte-Bereich
                       der Originaldatei, der auf dieser Seite steckt
-    block_k:          2 Byte (uint16, big-endian)
-    block_r:          2 Byte (uint16, big-endian)
+    block_k:          2 Byte (uint16, big-endian) - Datensymbole JE CODEWORT
+    block_r:          2 Byte (uint16, big-endian) - Paritaetssymbole JE CODEWORT
+    [ab Version 6] interleave: 1 Byte - RS-Codewoerter je Nutzdatenzeile
+                      (verschraenkt, siehe framing.LineCode; bis Version 5 immer 1)
     total_file_size:  8 Byte (uint64, big-endian)
     sha256:           32 Byte
     ln_width:         1 Byte  (Symbole fuer das Zeilennummernfeld der Nutzdatenzeilen)
@@ -46,6 +50,11 @@ Versionsunterschiede beim Lesen:
             siehe framing.symbols_crc32); bis Version 4 wurde dort nur das
             untere Byte jedes Symbols erfasst. Fuer Alphabete <= 256 Zeichen
             sind Version 4 und 5 bit-identisch.
+    5 -> 6: mehrere verschraenkte RS-Codewoerter je Zeile (interleave-Feld),
+            dadurch ist die Zeilenbreite nicht mehr durch die Alphabetgroesse
+            begrenzt; Presets werden per Kennung statt mit allen Zeichen
+            gespeichert (alphabet_mode 2) - beim 512er-Preset schrumpft der
+            Header so von ~30 auf ~1 Zeile je Kopie.
 
 Seitenteilung (encode.py --lines):
     Jede Seite traegt eine VOLLSTAENDIGE Kopie dieses Headers (inkl. Praeambel
@@ -62,14 +71,19 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .alphabets import (
-    Alphabet, ENCODING_UTF8, ENCODING_UTF16LE, ENCODING_UTF32LE, ENCODING_UTF32BE,
+    ENCODING_UTF8, ENCODING_UTF16LE, ENCODING_UTF32LE, ENCODING_UTF32BE, PRESET_IDS, PRESETS,
+    PRESETS_BY_ID, Alphabet,
 )
 from .util import digits_to_int, int_to_digits
 
-FORMAT_VERSION = 5
-SUPPORTED_FORMAT_VERSIONS = (3, 4, 5)  # 3 = ohne flags-Byte, 4 = CRC nur unteres Symbolbyte (nur Lesen)
+FORMAT_VERSION = 6
+SUPPORTED_FORMAT_VERSIONS = (3, 4, 5, 6)  # aeltere Versionen nur lesen, siehe Modul-Docstring
 FIRST_VERSION_WITH_FLAGS = 4
 FIRST_VERSION_WITH_WIDE_CRC = 5
+FIRST_VERSION_WITH_INTERLEAVE = 6
+ALPHABET_MODE_DEFAULT = 0
+ALPHABET_MODE_CUSTOM = 1
+ALPHABET_MODE_PRESET = 2
 FLAG_SCRAMBLED = 0x01
 DOCUMENT_ID_WIDTH = 8  # Byte, siehe pack_header
 SHA256_WIDTH = 32
@@ -118,19 +132,32 @@ class HeaderMeta:
     """Inhalt eines entpackten Seiten-Headers (siehe Modul-Docstring)."""
     version: int
     scrambled: bool
-    is_custom_alphabet: bool
-    alphabet_chars: str | None
+    preset: str | None  # Preset-Name; None bei Custom-Alphabet (oder Preset vor Version 6)
+    alphabet_chars: str | None  # nur bei Custom-Alphabet (bis Version 5 auch fuer Presets ausser 'default')
     text_encoding: int
     document_id: bytes
     page_count: int
     page_number: int
     page_checksum: int
-    k: int
-    r: int
+    k: int  # Datensymbole je Codewort
+    r: int  # Paritaetssymbole je Codewort
+    interleave: int  # Codewoerter je Zeile
     total_file_size: int
     sha256: bytes
     ln_width: int
     filename: str
+
+    @property
+    def payload_chars(self) -> str:
+        """Zeichenfolge des Nutzdaten-Alphabets."""
+        return self.alphabet_chars if self.preset is None else PRESETS[self.preset].chars
+
+    @property
+    def alphabet_label(self) -> str:
+        """Beschreibung des Nutzdaten-Alphabets fuer Ausgaben."""
+        if self.preset is not None:
+            return f"Preset '{self.preset}'"
+        return f"eigenes Alphabet ({len(self.alphabet_chars)} Zeichen): {self.alphabet_chars}"
 
 
 # ---------------------------------------------------------------------------
@@ -142,10 +169,12 @@ def _check_range(name: str, value: int, maximum: int):
         raise ValueError(f"{name}={value} liegt ausserhalb des Header-Feldbereichs 0..{maximum}")
 
 
-def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r: int,
+def pack_header(payload_alphabet: Alphabet, preset: str | None, k: int, r: int, interleave: int,
                 total_file_size: int, sha256_digest: bytes, ln_width: int,
                 filename: str, document_id: bytes, page_count: int, page_number: int,
                 page_checksum: int, text_encoding: int, scrambled: bool = False) -> bytes:
+    """preset: Preset-Name oder None fuer ein Custom-Alphabet (dann werden die
+    Zeichen von payload_alphabet gespeichert)."""
     if text_encoding not in TEXT_ENCODING_TO_CODEC:
         raise ValueError(f"text_encoding muss eines von {tuple(TEXT_ENCODING_TO_CODEC)} sein")
     if len(document_id) != DOCUMENT_ID_WIDTH:
@@ -160,25 +189,31 @@ def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r:
     _check_range("page_number", page_number, _UINT16_MAX)
     _check_range("k", k, _UINT16_MAX)
     _check_range("r", r, _UINT16_MAX)
+    _check_range("interleave", interleave, _UINT8_MAX)
     _check_range("total_file_size", total_file_size, _UINT64_MAX)
     _check_range("ln_width", ln_width, _UINT8_MAX)
 
     out = bytearray()
     out.append(FORMAT_VERSION)
     out.append(FLAG_SCRAMBLED if scrambled else 0)
-    out.append(1 if is_custom_alphabet else 0)
-    if is_custom_alphabet:
+    if preset == "default":
+        out.append(ALPHABET_MODE_DEFAULT)
+    elif preset is not None:
+        out.append(ALPHABET_MODE_PRESET)
+        out.append(PRESET_IDS[preset])
+    else:
         # utf-8 statt ascii: ein Custom-Alphabet darf bewusst ueber 7-Bit-ASCII
         # hinausgehen (siehe alphabets.py). Laengenfeld ist die BYTE-Laenge,
         # nicht die Zeichenanzahl - deshalb 2 Byte statt 1 (koennte bei vielen
         # Mehrbyte-Zeichen sonst ueberlaufen).
+        out.append(ALPHABET_MODE_CUSTOM)
         chars = payload_alphabet.chars.encode("utf-8")
         out.extend(struct.pack(">H", len(chars)))
         out.extend(chars)
     out.append(text_encoding)
     out.extend(document_id)
-    out.extend(struct.pack(">HHIHHQ", page_count, page_number, page_checksum & 0xFFFFFFFF,
-                           k, r, total_file_size))
+    out.extend(struct.pack(">HHIHHBQ", page_count, page_number, page_checksum & 0xFFFFFFFF,
+                           k, r, interleave, total_file_size))
     out.extend(sha256_digest)
     out.append(ln_width)
     name_bytes = _truncate_utf8(filename, _UINT8_MAX)
@@ -212,15 +247,26 @@ def unpack_header(data: bytes) -> HeaderMeta:
             f"(bekannt: {SUPPORTED_FORMAT_VERSIONS})."
         )
     flags = take(1)[0] if version >= FIRST_VERSION_WITH_FLAGS else 0
-    is_custom = take(1)[0] == 1
-    alphabet_chars = None
+    alphabet_mode = take(1)[0]
+    preset = alphabet_chars = None
     try:
-        if is_custom:
+        if alphabet_mode == ALPHABET_MODE_DEFAULT:
+            preset = "default"
+        elif alphabet_mode == ALPHABET_MODE_CUSTOM:
             (alen,) = struct.unpack(">H", take(2))
             alphabet_chars = take(alen).decode("utf-8")
+        elif alphabet_mode == ALPHABET_MODE_PRESET and version >= FIRST_VERSION_WITH_INTERLEAVE:
+            preset_id = take(1)[0]
+            if preset_id not in PRESETS_BY_ID:
+                raise HeaderError(f"Unbekannte Preset-Kennung {preset_id} (neuere Programmversion?)")
+            preset = PRESETS_BY_ID[preset_id]
+        else:
+            raise HeaderError(f"Unbekannter Alphabet-Modus {alphabet_mode}")
         text_encoding = take(1)[0]
         document_id = take(DOCUMENT_ID_WIDTH)
-        page_count, page_number, page_checksum, k, r, total_file_size = struct.unpack(">HHIHHQ", take(20))
+        page_count, page_number, page_checksum, k, r = struct.unpack(">HHIHH", take(12))
+        interleave = take(1)[0] if version >= FIRST_VERSION_WITH_INTERLEAVE else 1
+        (total_file_size,) = struct.unpack(">Q", take(8))
         sha256_digest = take(SHA256_WIDTH)
         ln_width = take(1)[0]
         name_len = take(1)[0]
@@ -229,10 +275,10 @@ def unpack_header(data: bytes) -> HeaderMeta:
         raise HeaderError(f"Header enthaelt ungueltiges UTF-8 ({e})") from e
 
     return HeaderMeta(
-        version=version, scrambled=bool(flags & FLAG_SCRAMBLED), is_custom_alphabet=is_custom,
+        version=version, scrambled=bool(flags & FLAG_SCRAMBLED), preset=preset,
         alphabet_chars=alphabet_chars, text_encoding=text_encoding, document_id=document_id,
         page_count=page_count, page_number=page_number, page_checksum=page_checksum,
-        k=k, r=r, total_file_size=total_file_size, sha256=sha256_digest,
+        k=k, r=r, interleave=interleave, total_file_size=total_file_size, sha256=sha256_digest,
         ln_width=ln_width, filename=filename,
     )
 

@@ -1,10 +1,18 @@
 """
 Nutzdatenzeile:  [Zeilennummer: ln_width Symbole, Header-Alphabet]
                  [CRC32:        crc_width Symbole, Header-Alphabet]
-                 [RS-Codewort:  k+r Symbole, Nutzdaten-Alphabet]  (=Payload+Paritaet)
+                 [Nutzteil:     interleave * (k+r) Symbole, Nutzdaten-Alphabet]
 
-CRC32 wird NUR ueber die k Nutzdatensymbole berechnet (nicht ueber die
-Zeilennummer - bewusste Design-Entscheidung, siehe README "Restrisiken").
+Der Nutzteil besteht aus `interleave` Reed-Solomon-Codewoertern (je k Daten-
+und r Paritaetssymbole), deren Symbole reihum verschraenkt sind: Position j
+gehoert zu Codewort j % interleave (siehe LineCode). Ein RS-Codewort kann
+hoechstens Alphabetgroesse-1 Symbole lang sein; durch mehrere Codewoerter
+je Zeile ist die Zeilenbreite davon unabhaengig. Die Verschraenkung verteilt
+benachbarte Lesefehler zudem auf verschiedene Codewoerter.
+
+CRC32 wird NUR ueber die interleave*k Nutzdatensymbole der Zeile berechnet
+(nicht ueber die Zeilennummer - bewusste Design-Entscheidung, siehe README
+"Restrisiken").
 """
 import re
 import zlib
@@ -13,7 +21,7 @@ from enum import Enum
 
 from .alphabets import Alphabet
 from .header import FIRST_VERSION_WITH_WIDE_CRC, FORMAT_VERSION
-from .rs_codec import GaloisField, rs_encode, rs_decode
+from .rs_codec import GaloisField, rs_decode, rs_encode, rs_generator_poly
 from .util import ceil_div, digits_needed, digits_to_int, int_to_digits
 
 CRC_BITS = 32
@@ -61,23 +69,31 @@ def total_lines_for(total_file_size: int, k: int, bits_per_symbol: int) -> int:
 
 @dataclass(frozen=True)
 class Layout:
-    k: int
-    r: int
+    k: int  # Datensymbole je Codewort
+    r: int  # Paritaetssymbole je Codewort
+    interleave: int  # Codewoerter je Zeile
     ln_width: int
     crc_width: int
     total_lines: int
-    capped: bool  # True, wenn --width wegen der RS-Codewort-Obergrenze nicht ausgeschoepft wurde
+
+    @property
+    def data_per_line(self) -> int:
+        return self.k * self.interleave
 
     @property
     def effective_width(self) -> int:
-        """Tatsaechliche Laenge einer Nutzdatenzeile in Zeichen."""
-        return self.ln_width + self.crc_width + self.k + self.r
+        """Tatsaechliche Laenge einer Nutzdatenzeile in Zeichen (<= --width;
+        kleiner nur um den Rest, der sich nicht gleichmaessig auf die
+        Codewoerter verteilen laesst)."""
+        return self.ln_width + self.crc_width + self.interleave * (self.k + self.r)
 
 
 def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
                    header_alpha: Alphabet, redundancy_pct: float | None,
                    parity_symbols: int | None) -> Layout:
-    """Loest iterativ k, r, ln_width aus --width + --redundancy (oder --parity-symbols).
+    """Loest iterativ k, r, interleave, ln_width aus --width + --redundancy
+    (oder --parity-symbols). parity_symbols ist die Paritaet JE ZEILE und wird
+    (aufgerundet) gleichmaessig auf die Codewoerter verteilt.
     ln_width haengt von total_lines ab, total_lines haengt von k ab, k haengt
     (ueber die Restbreite) von ln_width ab - konvergiert aber in 1-2
     Iterationsschritten, da ln_width sich nur logarithmisch aendert."""
@@ -95,37 +111,20 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
                 f"--width {width} ist zu klein (Header-Alphabet-Felder allein "
                 f"brauchen schon {cw + ln_width} Symbole)"
             )
+        interleave = ceil_div(remaining, max_n)
+        n = remaining // interleave  # Laenge jedes Codeworts (<= max_n)
         if parity_symbols is not None:
-            r = parity_symbols
-            k = remaining - r
+            r = ceil_div(parity_symbols, interleave)
+            k = n - r
         else:
-            k = max(1, round(remaining / (1 + pct / 100.0)))
-            r = remaining - k
+            k = max(1, round(n / (1 + pct / 100.0)))
+            r = n - k
         if k < 1 or r < 1:
             raise ValueError(
-                f"--width {width} reicht nicht fuer sinnvolle k/r-Werte (k={k}, r={r})"
+                f"--width {width} reicht nicht fuer sinnvolle k/r-Werte (k={k}, r={r} je Codewort)"
             )
-        capped = False
-        if k + r > max_n:
-            # RS-Codewort kann bei diesem Alphabet nicht so lang werden wie --width
-            # es erlauben wuerde (max. Codewortlaenge = Alphabetgroesse - 1). Wir
-            # kappen k+r auf das Maximum statt hart abzubrechen.
-            if parity_symbols is not None:
-                # explizit vom Nutzer vorgegebenes r respektieren, nur k kuerzen
-                if parity_symbols >= max_n:
-                    raise ValueError(
-                        f"--parity-symbols {parity_symbols} ist allein schon >= der "
-                        f"maximalen RS-Codewortlaenge {max_n} - groesseres Alphabet noetig"
-                    )
-                r = parity_symbols
-                k = max_n - r
-            else:
-                ratio = k / (k + r)
-                k = max(1, round(max_n * ratio))
-                r = max_n - k
-            capped = True
 
-        total_lines = max(1, ceil_div(total_data_symbols, k))
+        total_lines = max(1, ceil_div(total_data_symbols, k * interleave))
         new_ln_width = digits_needed(total_lines, header_alpha.size)
         if new_ln_width == ln_width:
             break
@@ -133,23 +132,57 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
     else:
         raise ValueError("Layout-Berechnung konvergiert nicht (unerwartet)")
 
-    return Layout(k=k, r=r, ln_width=ln_width, crc_width=cw, total_lines=total_lines, capped=capped)
+    return Layout(k=k, r=r, interleave=interleave, ln_width=ln_width, crc_width=cw,
+                  total_lines=total_lines)
 
 
-def build_payload_line(line_number: int, data_block, k: int, r: int, gen, gf: GaloisField,
-                       ln_width: int, crc_width: int,
+class LineCode:
+    """Fehlerkorrektur einer Nutzdatenzeile: `interleave` RS-Codewoerter mit
+    je k Daten- und r Paritaetssymbolen. Die Daten der Zeile werden der Reihe
+    nach auf die Codewoerter verteilt (Codewort i bekommt data[i*k:(i+1)*k]),
+    die Codewoerter dann symbolweise reihum verschraenkt."""
+
+    def __init__(self, k: int, r: int, interleave: int, gf: GaloisField):
+        self.k, self.r, self.interleave, self.gf = k, r, interleave, gf
+        self.gen = rs_generator_poly(r, gf)
+
+    @property
+    def data_len(self) -> int:
+        return self.k * self.interleave
+
+    @property
+    def encoded_len(self) -> int:
+        return (self.k + self.r) * self.interleave
+
+    def encode(self, data) -> list[int]:
+        if len(data) != self.data_len:
+            raise ValueError(f"Datenblock hat {len(data)} statt {self.data_len} Symbole")
+        k, il = self.k, self.interleave
+        codewords = [rs_encode(data[i * k:(i + 1) * k], self.r, self.gen, self.gf) for i in range(il)]
+        return [codewords[j % il][j // il] for j in range(self.encoded_len)]
+
+    def decode(self, symbols):
+        """Rueckgabe: (daten, anzahl_korrigierter_fehler) oder (None, -1),
+        sobald eines der Codewoerter nicht korrigierbar ist."""
+        if len(symbols) != self.encoded_len:
+            return None, -1
+        data, total_errors = [], 0
+        for i in range(self.interleave):
+            decoded, num_errors = rs_decode(symbols[i::self.interleave], self.r, self.gf)
+            if decoded is None:
+                return None, -1
+            data.extend(decoded)
+            total_errors += num_errors
+        return data, total_errors
+
+
+def build_payload_line(line_number: int, data_block, code: LineCode, ln_width: int, crc_width: int,
                        payload_alpha: Alphabet, header_alpha: Alphabet) -> str:
-    if len(data_block) != k:
-        raise ValueError(f"Datenblock hat {len(data_block)} statt k={k} Symbole")
-    codeword = rs_encode(data_block, r, gen, gf)  # k Daten- + r Paritaetssymbole
-
+    encoded = code.encode(data_block)
     crc = symbols_crc32(data_block, crc_is_wide(FORMAT_VERSION, payload_alpha.bits_per_symbol))
     ln_digits = int_to_digits(line_number, ln_width, header_alpha.size)
     crc_digits = int_to_digits(crc, crc_width, header_alpha.size)
-
-    prefix_text = header_alpha.symbols_to_text(ln_digits + crc_digits)
-    payload_text = payload_alpha.symbols_to_text(codeword)
-    return prefix_text + payload_text
+    return header_alpha.symbols_to_text(ln_digits + crc_digits) + payload_alpha.symbols_to_text(encoded)
 
 
 class LineStatus(str, Enum):
@@ -170,7 +203,7 @@ class LineResult:
     repaired: str | None = None  # Beschreibung einer Laengenreparatur, sonst None
 
 
-def parse_payload_line(raw: str, k: int, r: int, gf: GaloisField, ln_width: int, crc_width: int,
+def parse_payload_line(raw: str, code: LineCode, ln_width: int, crc_width: int,
                        payload_alpha: Alphabet, header_alpha: Alphabet,
                        wide_crc: bool) -> LineResult | None:
     """Parst eine Roh-Zeile. Rueckgabe None fuer eine komplett leere Zeile
@@ -200,28 +233,28 @@ def parse_payload_line(raw: str, k: int, r: int, gf: GaloisField, ln_width: int,
         return LineResult(line_number, LineStatus.UNCORRECTABLE,
                           reason="Nutzdatenteil nicht im Nutzdaten-Alphabet lesbar")
 
-    if len(payload_symbols) == k + r:
-        status, decoded, reason = _decode_codeword(payload_symbols, k, r, gf, expected_crc, wide_crc)
+    if len(payload_symbols) == code.encoded_len:
+        status, decoded, reason = _decode_payload(payload_symbols, code, expected_crc, wide_crc)
         if status == LineStatus.OK:
             return LineResult(line_number, status, data=decoded)
     else:
         status, decoded, reason = (LineStatus.UNCORRECTABLE, None,
-                                   f"Erwartet {k + r} Symbole, {len(payload_symbols)} vorhanden")
+                                   f"Erwartet {code.encoded_len} Symbole, {len(payload_symbols)} vorhanden")
 
-    repair = _repair_shifted_payload(payload_raw, k, r, gf, expected_crc, payload_alpha, wide_crc)
+    repair = _repair_shifted_payload(payload_raw, code, expected_crc, payload_alpha, wide_crc)
     if repair is not None:
         decoded, description = repair
         return LineResult(line_number, LineStatus.OK, data=decoded, repaired=description)
     return LineResult(line_number, status, data=decoded, reason=reason)
 
 
-def _decode_codeword(payload_symbols, k: int, r: int, gf: GaloisField, expected_crc: int, wide_crc: bool):
-    """RS-Korrektur + CRC-Pruefung eines Codeworts der Laenge k+r.
+def _decode_payload(payload_symbols, code: LineCode, expected_crc: int, wide_crc: bool):
+    """RS-Korrektur aller Codewoerter + CRC-Pruefung des Nutzteils einer Zeile.
     Rueckgabe: (status, daten oder None, grund oder None)."""
-    decoded, num_errors = rs_decode(payload_symbols, r, gf)
+    decoded, num_errors = code.decode(payload_symbols)
     if decoded is None:
         return LineStatus.UNCORRECTABLE, None, "Reed-Solomon: zu viele Fehler in dieser Zeile"
-    if symbols_crc32(decoded[:k], wide_crc) != expected_crc:
+    if symbols_crc32(decoded, wide_crc) != expected_crc:
         return (LineStatus.CORRECTED_SUSPECT, decoded,
                 f"RS meldet {num_errors} korrigierte Fehler, aber CRC passt danach nicht")
     return LineStatus.OK, decoded, None
@@ -285,17 +318,17 @@ def _shift_candidates(text: str, delta: int):
         yield candidate, ops
 
 
-def _repair_shifted_payload(payload_raw: str, k: int, r: int, gf: GaloisField, expected_crc: int,
+def _repair_shifted_payload(payload_raw: str, code: LineCode, expected_crc: int,
                             payload_alpha: Alphabet, wide_crc: bool):
     """Versucht eine Zeile zu retten, in der die OCR eine Folge gleicher
     Zeichen falsch gezaehlt hat: Ein einziges fehlendes/zusaetzliches Zeichen
-    verschiebt den Rest des Codeworts, sodass RS weit mehr als floor(r/2)
+    verschiebt den Rest der Zeile, sodass RS weit mehr als floor(r/2)
     Fehler sieht. Probiert die Varianten aus _shift_candidates durch und
     akzeptiert nur eine, die RS dekodieren kann UND deren CRC32 stimmt - bei
     der Vielzahl an Kandidaten ist der CRC die eigentliche Absicherung gegen
     Falsch-Positive. Bei mehreren Treffern gewinnt der mit den wenigsten
     RS-Korrekturen. Rueckgabe: (daten, beschreibung) oder None."""
-    delta = len(payload_raw) - (k + r)
+    delta = len(payload_raw) - code.encoded_len
     if abs(delta) > MAX_SHIFT_REPAIR:
         return None
     best = None
@@ -304,8 +337,8 @@ def _repair_shifted_payload(payload_raw: str, k: int, r: int, gf: GaloisField, e
         if candidate in seen:
             continue
         seen.add(candidate)
-        decoded, num_errors = rs_decode(payload_alpha.text_to_symbols(candidate), r, gf)
-        if decoded is None or symbols_crc32(decoded[:k], wide_crc) != expected_crc:
+        decoded, num_errors = code.decode(payload_alpha.text_to_symbols(candidate))
+        if decoded is None or symbols_crc32(decoded, wide_crc) != expected_crc:
             continue
         if best is None or num_errors < best[1]:
             best = (decoded, num_errors, ops)

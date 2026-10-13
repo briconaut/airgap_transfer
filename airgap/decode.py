@@ -52,9 +52,9 @@ import zlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .alphabets import DEFAULT_ALPHABET, HEADER_ALPHABET, Alphabet
+from .alphabets import HEADER_ALPHABET, Alphabet
 from .framing import (
-    LineResult, LineStatus, byte_offset_of_line, crc_is_wide, crc_width_for, parse_payload_line,
+    LineCode, LineResult, LineStatus, byte_offset_of_line, crc_is_wide, crc_width_for, parse_payload_line,
     reflow_joined_lines, total_lines_for, unarrange_columns,
 )
 from .header import (
@@ -240,16 +240,14 @@ def _validate_meta(meta: HeaderMeta):
     sind per Mehrheitsentscheid rekonstruiert - bei sehr schlechter Vorlage
     koennen trotzdem unsinnige Werte herauskommen, die spaeter zu
     Abstuerzen statt zu einer sauberen Fehlermeldung fuehren wuerden."""
-    if meta.is_custom_alphabet:
-        try:
-            payload_alpha = Alphabet(meta.alphabet_chars)
-        except ValueError as e:
-            raise HeaderError(f"Alphabet im Header ungueltig ({e})") from e
-        size = payload_alpha.size
-    else:
-        size = len(DEFAULT_ALPHABET)
+    try:
+        size = Alphabet(meta.payload_chars).size
+    except ValueError as e:
+        raise HeaderError(f"Alphabet im Header ungueltig ({e})") from e
     if meta.k < 1 or meta.r < 1 or meta.k + meta.r > size - 1:
         raise HeaderError(f"k={meta.k}/r={meta.r} passen nicht zu einem Alphabet mit {size} Zeichen")
+    if meta.interleave < 1:
+        raise HeaderError("0 Codewoerter je Zeile im Header")
     if meta.ln_width < 1:
         raise HeaderError("Zeilennummernbreite 0 im Header")
     if not 0 <= meta.page_number < meta.page_count:
@@ -271,20 +269,17 @@ def parse_page_header(seg, header_alpha):
 
 
 def format_header(meta: HeaderMeta):
-    if meta.is_custom_alphabet:
-        alphabet = f"eigenes Alphabet ({len(meta.alphabet_chars)} Zeichen): {meta.alphabet_chars}"
-    else:
-        alphabet = "Standard-Alphabet"
     enc = meta.text_encoding
     rows = [
         ("Formatversion", meta.version),
         ("Verwuerfelt", "ja" if meta.scrambled else "nein"),
-        ("Alphabet", alphabet),
+        ("Alphabet", meta.alphabet_label),
         ("Text-Encoding", f"{TEXT_ENCODING_NAMES.get(enc, 'unbekannt')} ({enc})"),
         ("Dokument-ID", meta.document_id.hex()),
         ("Seite", f"{meta.page_number} (0-basiert) von {meta.page_count}"),
         ("Seiten-Pruefsumme", f"0x{meta.page_checksum:08x}"),
-        ("Block k / r", f"{meta.k} / {meta.r}"),
+        ("Codewoerter/Zeile", meta.interleave),
+        ("Je Codewort k / r", f"{meta.k} / {meta.r} (korrigiert bis zu {meta.r // 2} Fehler)"),
         ("Zeilennummer-Breite", meta.ln_width),
         ("Dateigroesse", f"{meta.total_file_size} Bytes"),
         ("SHA-256", meta.sha256.hex()),
@@ -391,30 +386,34 @@ class DecodeContext:
     meta: HeaderMeta
     header_alpha: Alphabet
     payload_alpha: Alphabet = field(init=False)
-    gf: GaloisField = field(init=False)
+    code: LineCode = field(init=False)
     crc_width: int = field(init=False)
     wide_crc: bool = field(init=False)
     total_lines: int = field(init=False)
 
     def __post_init__(self):
         m = self.meta
-        self.payload_alpha = Alphabet(m.alphabet_chars) if m.is_custom_alphabet else Alphabet(DEFAULT_ALPHABET)
-        self.gf = GaloisField(self.bits_per_symbol)
+        self.payload_alpha = Alphabet(m.payload_chars)
+        self.code = LineCode(m.k, m.r, m.interleave, GaloisField(self.bits_per_symbol))
         self.crc_width = crc_width_for(self.header_alpha)
         self.wide_crc = crc_is_wide(m.version, self.bits_per_symbol)
-        self.total_lines = total_lines_for(m.total_file_size, m.k, self.bits_per_symbol)
+        self.total_lines = total_lines_for(m.total_file_size, self.k_line, self.bits_per_symbol)
 
     @property
     def bits_per_symbol(self) -> int:
         return self.payload_alpha.bits_per_symbol
 
     @property
+    def k_line(self) -> int:
+        """Datensymbole je Nutzdatenzeile (ueber alle Codewoerter)."""
+        return self.meta.k * self.meta.interleave
+
+    @property
     def payload_line_width(self) -> int:
-        return self.meta.ln_width + self.crc_width + self.meta.k + self.meta.r
+        return self.meta.ln_width + self.crc_width + self.code.encoded_len
 
     def parse(self, raw: str) -> LineResult | None:
-        m = self.meta
-        return parse_payload_line(raw, m.k, m.r, self.gf, m.ln_width, self.crc_width,
+        return parse_payload_line(raw, self.code, self.meta.ln_width, self.crc_width,
                                   self.payload_alpha, self.header_alpha, self.wide_crc)
 
 
@@ -519,7 +518,7 @@ class Assembly:
 
 def assemble(results: dict, ctx: DecodeContext) -> Assembly:
     """Setzt den vollstaendigen Symbolstrom zusammen (Luecken = 0-Symbole)."""
-    k = ctx.meta.k
+    k = ctx.k_line
     full_symbols = [0] * (ctx.total_lines * k)
     bad_lines = []
     repaired_lines = []
@@ -559,8 +558,8 @@ def verify_pages(pages: list[Page], page_line_ranges: dict, full_bytes: bytes, c
             bad_pages.append((pn, "keine gueltige Nutzdatenzeile auf dieser Seite gefunden"))
             continue
         min_ln, max_ln = rng
-        b0 = byte_offset_of_line(min_ln, ctx.meta.k, ctx.bits_per_symbol)
-        b1 = min(byte_offset_of_line(max_ln + 1, ctx.meta.k, ctx.bits_per_symbol), len(full_bytes))
+        b0 = byte_offset_of_line(min_ln, ctx.k_line, ctx.bits_per_symbol)
+        b1 = min(byte_offset_of_line(max_ln + 1, ctx.k_line, ctx.bits_per_symbol), len(full_bytes))
         if zlib.crc32(full_bytes[b0:b1]) != page.meta.page_checksum:
             bad_pages.append((pn, "Seiten-Pruefsumme stimmt nicht (Seite vermutlich unvollstaendig/beschaedigt)"))
     return bad_pages
@@ -685,7 +684,7 @@ def decode(args) -> int:
         )
         return EXIT_HASH_MISMATCH
 
-    split_at = byte_offset_of_line(asm.first_bad_line, meta.k, ctx.bits_per_symbol)
+    split_at = byte_offset_of_line(asm.first_bad_line, ctx.k_line, ctx.bits_per_symbol)
     part1, part2 = asm.full_bytes[:split_at], asm.full_bytes[split_at:]
     p1_path, p2_path = f"{args.output}.part1", f"{args.output}.part2"
     with open(p1_path, "wb") as f:

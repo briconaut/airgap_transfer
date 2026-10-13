@@ -131,17 +131,10 @@ def main():
     except ValueError as e:
         ap.error(str(e))
 
-    if layout.capped:
-        print(
-            f"Hinweis: --width {args.width} konnte wegen der RS-Codewort-Obergrenze "
-            f"({payload_alpha.size - 1} Symbole) nicht voll ausgenutzt werden. "
-            f"Tatsaechliche Zeilenbreite: {layout.effective_width}.",
-            file=sys.stderr,
-        )
     print(
-        f"Input: {len(data)} Base64-Zeichen. "
-        f"Layout: k={layout.k}, r={layout.r} (korrigiert bis zu {layout.r // 2} Fehler/Zeile), "
-        f"{layout.total_lines} Nutzdatenzeilen.",
+        f"Input: {len(data)} Base64-Zeichen. Layout: Zeilenbreite {layout.effective_width}, "
+        f"je Zeile {layout.interleave} Codewort/Codewoerter mit k={layout.k}, r={layout.r} "
+        f"(korrigiert bis zu {layout.r // 2} Fehler je Codewort), {layout.total_lines} Nutzdatenzeilen.",
         file=sys.stderr,
     )
 
@@ -149,7 +142,7 @@ def main():
     # enthaelt praktisch keine langen Folgen gleicher Zeichen) - degenerierter
     # Einzelseiten-Fall, gleicher Code-Pfad wie encode.py ohne --lines.
     (page,) = encode_document(
-        data, layout, args.width, payload_alpha, header_alpha, is_custom_alphabet=False,
+        data, layout, payload_alpha, header_alpha, preset="default",
         text_encoding=TEXT_ENCODING_UTF8, filename=args.filename, scrambled=False,
         progress=args.progress, progress_label="Reframing",
     )
