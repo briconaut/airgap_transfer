@@ -382,7 +382,10 @@ airgap/         Paket mit der eigentlichen Implementierung
   encode.py, decode.py, reframe.py   Kommandozeilen-Logik (python3 -m airgap.<name>)
   encoder.py    gemeinsame Encode-Pipeline (Layout, Zeilen, Seiten, Ausgabe)
   framing.py    Aufbau/Parsen einer Nutzdatenzeile, Layout, Längenreparatur, Spalten
-  header.py     Header-Format, Präambel, 3-fach-Kopien mit Mehrheitsentscheid
+  header.py     Header-Felder, Präambel, 3-fach-Kopien mit Mehrheitsentscheid
+  formats/      eine Klasse je Formatversion (v3.py … v6.py, linear voneinander
+                abgeleitet): Header-Rohbytes, Zeilen-CRC-Variante, Layout-Grenzen;
+                Registry in formats/__init__.py
   rs_codec.py   Reed-Solomon über GF(2^5) bis GF(2^9)
   alphabets.py  Header-Alphabet, Presets, Bit-Slicing Bytes <-> Symbole
   scramble.py   Verwürfelung der Nutzdatensymbole
