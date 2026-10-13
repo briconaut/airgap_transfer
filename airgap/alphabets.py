@@ -206,7 +206,7 @@ class Alphabet:
             raise ValueError(
                 f"Alphabetlaenge muss eine Zweierpotenz aus {ALLOWED_ALPHABET_SIZES} sein, "
                 f"nicht {len(chars)} (arbitraere Basiskonvertierung wurde bewusst verworfen, "
-                f"siehe Design-Notizen: zu langsam/unvorhersehbar in reinem Python)."
+                f"da zu langsam/unvorhersehbar in reinem Python)."
             )
         if len(set(chars)) != len(chars):
             raise ValueError("Alphabet enthaelt doppelte Zeichen")
@@ -215,7 +215,7 @@ class Alphabet:
             # ist positionsfest ohne Trennzeichen, siehe framing.py). Das eingebaute
             # 64er-Preset bleibt bewusst 7-Bit-ASCII; ein CUSTOM-Alphabet darf
             # bewusst darueber hinausgehen, wenn das Zielterminal das nachweislich
-            # kann (siehe Design-Notizen Runde 5/9) - das ist kein Bug, sondern
+            # kann - das ist kein Bug, sondern
             # der eigentliche Zweck des --alphabet-Parameters.
             if ord(c) < 33 or c.isspace():
                 raise ValueError(f"Zeichen {c!r} ist ein Steuerzeichen/Whitespace - nicht erlaubt")
@@ -267,7 +267,7 @@ class Alphabet:
         acc_bits = 0
         out = bytearray()
         for s in symbols:
-            acc = ((acc << bits) | s) & 0xFFFFFF  # Akkumulator begrenzt halten (siehe Benchmark-Notizen: unbegrenztes Wachstum -> O(n^2))
+            acc = ((acc << bits) | s) & 0xFFFFFF  # Akkumulator begrenzt halten (unbegrenztes Wachstum -> O(n^2), siehe bytes_to_symbols)
             acc_bits += bits
             while acc_bits >= 8:
                 acc_bits -= 8

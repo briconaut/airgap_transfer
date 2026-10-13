@@ -935,6 +935,8 @@ def test_too_many_pages():
     make_test_file(src, 100_000)
     r = run([sys.executable, ENCODE, src, "-o", f"{WORKDIR}/t27_enc.txt", "--width", "12", "--lines", "1"])
     assert r.returncode == 2 and "Seiten" in r.stderr and "Traceback" not in r.stderr, r.stderr
+    r = run([sys.executable, ENCODE, f"{WORKDIR}/gibt_es_nicht.bin"])
+    assert r.returncode == 1 and "nicht lesbar" in r.stderr and "Traceback" not in r.stderr, r.stderr
     print(" OK: verstaendliche Fehlermeldung statt Traceback")
 
 

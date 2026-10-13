@@ -37,15 +37,19 @@ def hash_blob(data: bytes) -> str:
 
 
 def strip_leading_dotslash(path: str) -> str:
-    """Entfernt beliebig viele fuehrende './'-Segmente (Q2)."""
+    """Entfernt beliebig viele fuehrende './'-Segmente ('././a' -> 'a'), damit
+    Archive mit und ohne './'-Praefix gleich behandelt werden."""
     while path.startswith("./"):
         path = path[2:]
     return path
 
 
 def apply_strip(name: str, strip_dirs: list[str]) -> str | None:
-    """Wendet die erste passende --strip-Regel an, komponentenweise (Q1, Q3).
-    None bedeutet: Eintrag ueberspringen, da Zielpfad sonst leer wuerde (Q5)."""
+    """Wendet die erste passende --strip-Regel an. Verglichen wird
+    komponentenweise ('--strip proj' trifft 'proj/a', aber nicht 'project/a');
+    nach dem ersten Treffer werden keine weiteren Regeln angewendet.
+    None bedeutet: Eintrag ueberspringen, da der Zielpfad sonst leer wuerde
+    (eine Datei, deren Pfad genau dem --strip-Verzeichnis entspricht)."""
     normalized = strip_leading_dotslash(name)
     components = normalized.split("/")
 
@@ -110,7 +114,7 @@ def import_archive(stream, strip_dirs: list[str], index_env: dict) -> int:
             if path is None:
                 continue
 
-            if path in seen_paths:  # Q4: spaeterer Eintrag gewinnt, hier nur Sichtbarkeit
+            if path in seen_paths:  # spaeterer Eintrag gewinnt (wie beim Entpacken), hier nur Warnung
                 print(f"WARNUNG: Pfad '{path}' wird ueberschrieben (Kollision)", file=sys.stderr)
             seen_paths.add(path)
             index_info.append(f"{mode} {blob}\t{path}")

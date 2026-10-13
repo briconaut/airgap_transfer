@@ -131,8 +131,12 @@ def main():
 
     # --- Eingabe lesen -----------------------------------------------------
     if args.input:
-        with open(args.input, "rb") as f:
-            data = f.read()
+        try:
+            with open(args.input, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            print(f"FEHLER: Eingabedatei nicht lesbar ({e}).", file=sys.stderr)
+            return 1
         default_name = os.path.basename(args.input)
     else:
         data = sys.stdin.buffer.read()
