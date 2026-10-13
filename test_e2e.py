@@ -1079,6 +1079,70 @@ def test_compact_preset_header():
     print(" OK: kompakter Header, Preset-Name und Encoding in --header sichtbar")
 
 
+def test_format_versions_roundtrip():
+    print("== Test 34: --format-version 3 bis 6, Roundtrip mit dem aktuellen Decoder ==")
+    src = f"{WORKDIR}/t34_src.bin"
+    make_test_file(src, 4_000)
+    cases = [  # (version, Optionen, Preset im Header-Bericht, verwuerfelt)
+        ("3", ["--preset", "utf16le256", "--lines", "15"], "eigenes Alphabet (256 Zeichen)", "nein"),
+        ("4", ["--preset", "utf32le512", "--lines", "10", "--columns", "2"], "eigenes Alphabet (512 Zeichen)", "ja"),
+        ("5", ["--preset", "utf32be512", "--no-scramble"], "eigenes Alphabet (512 Zeichen)", "nein"),
+        ("6", ["--preset", "utf32le512"], "Preset 'utf32le512'", "ja"),
+    ]
+    for version, opts, alphabet_label, scrambled in cases:
+        enc, out = f"{WORKDIR}/t34_enc_v{version}.txt", f"{WORKDIR}/t34_out_v{version}"
+        r = run([sys.executable, ENCODE, src, "-o", enc, "--format-version", version, *opts])
+        assert r.returncode == 0, r.stderr
+        assert f"Formatversion {version}, Layout" in r.stderr, r.stderr
+        r = run([sys.executable, DECODE, "--header", enc])
+        assert r.returncode == 0, r.stderr
+        fields = dict(line.split(":", 1) for line in r.stdout.splitlines() if line.startswith("  "))
+        fields = {key.strip(): value.strip() for key, value in fields.items()}
+        assert fields["Formatversion"] == version and fields["Verwuerfelt"] == scrambled, r.stdout
+        assert fields["Alphabet"].startswith(alphabet_label), r.stdout
+        r = run([sys.executable, DECODE, enc, "-o", out])
+        assert r.returncode == 0, r.stderr
+        with open(src, "rb") as f, open(out, "rb") as g:
+            assert f.read() == g.read(), f"Roundtrip mit Formatversion {version} fehlgeschlagen"
+    print(" OK: Versionen 3-6 kodiert, Header-Felder versionsgerecht, Roundtrip exakt")
+
+
+def test_format_version_options():
+    print("== Test 35: --format-version bestimmt die verfuegbaren Optionen ==")
+    src, enc = f"{WORKDIR}/t35_src.bin", f"{WORKDIR}/t35_enc.txt"
+    make_test_file(src, 2_000)
+
+    def encode(*opts):
+        return run([sys.executable, ENCODE, src, "-o", enc, *opts])
+
+    # v3 kennt weder Spalten noch Verwuerfelung noch UTF-32-/512er-Alphabete
+    for opts in (["--columns", "2"], ["--no-scramble"]):
+        r = encode("--format-version", "3", *opts)
+        assert r.returncode == 2 and "unrecognized arguments" in r.stderr, r.stderr
+    r = encode("--format-version", "3", "--preset", "utf32le128")
+    assert r.returncode == 2 and "invalid choice" in r.stderr, r.stderr
+    r = encode("--format-version", "3", "--alphabet", "".join(chr(0x100 + i) for i in range(512)))
+    assert r.returncode == 2 and "nicht erlaubt" in r.stderr, r.stderr
+    r = run([sys.executable, ENCODE, "--format-version", "3", "--help"])
+    assert r.returncode == 0 and "--columns" not in r.stdout and "--no-scramble" not in r.stdout, r.stdout
+    r = encode("--format-version", "7")
+    assert r.returncode == 2 and "invalid choice" in r.stderr, r.stderr
+
+    # Default-Breite wird bis v5 auf ein Codewort je Zeile gekuerzt, eine
+    # explizit zu grosse Breite ist ein Fehler
+    r = encode("--format-version", "5")
+    assert r.returncode == 0 and "Default-Breite 100" in r.stderr, r.stderr
+    with open(enc, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    widths = {len(lines[i]) for i in payload_line_indices(lines)}
+    assert widths == {70}, widths  # ln_width 1 + CRC 6 + 63 Symbole (GF64)
+    r = encode("--format-version", "5", "--width", "100")
+    assert r.returncode == 2 and "zu gross" in r.stderr, r.stderr
+    r = encode("--format-version", "5", "--width", "70")
+    assert r.returncode == 0 and "Default-Breite" not in r.stderr, r.stderr
+    print(" OK: versionsfremde Optionen abgelehnt, Breite versionsgerecht begrenzt")
+
+
 def load_tests(loader, tests, pattern):
     """unittest-Einstieg: jede test_*-Funktion als eigener Testfall, in
     Definitionsreihenfolge (pytest sammelt die Funktionen direkt)."""

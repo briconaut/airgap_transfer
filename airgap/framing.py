@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .alphabets import Alphabet
-from .header import FIRST_VERSION_WITH_WIDE_CRC, FORMAT_VERSION
 from .rs_codec import GaloisField, rs_decode, rs_encode, rs_generator_poly
 from .util import ceil_div, digits_needed, digits_to_int, int_to_digits
 
@@ -32,18 +31,12 @@ def crc_width_for(header_alpha: Alphabet) -> int:
     return ceil_div(CRC_BITS, header_alpha.bits_per_symbol)
 
 
-def crc_is_wide(format_version: int, bits_per_symbol: int) -> bool:
-    """Ob das Zeilen-CRC volle Symbole mit 2 Byte erfasst (siehe symbols_crc32):
-    nur ab Formatversion 5 und nur bei Alphabeten mit > 8 Bit/Symbol."""
-    return format_version >= FIRST_VERSION_WITH_WIDE_CRC and bits_per_symbol > 8
-
-
 def symbols_crc32(symbols, wide: bool) -> int:
     """CRC32 ueber Datensymbole. wide=False: 1 Byte pro Symbol (nur das
     untere Byte - so bis Formatversion 4, bei <= 8 Bit/Symbol verlustfrei).
     wide=True: Symbole > 8 Bit (GF512) werden als 2 Byte big-endian erfasst,
-    damit das CRC auch das oberste Bit sieht (ab Formatversion 5, siehe
-    header.py). Welche Variante gilt, entscheidet crc_is_wide."""
+    damit das CRC auch das oberste Bit sieht (ab Formatversion 5). Welche
+    Variante gilt, entscheidet Format.crc_is_wide (siehe formats/)."""
     if wide:
         data = b"".join(s.to_bytes(2, "big") for s in symbols)
     else:
@@ -75,6 +68,7 @@ class Layout:
     ln_width: int
     crc_width: int
     total_lines: int
+    width_clamped: bool = False  # --width wurde auf das Maximum der Formatversion gekuerzt
 
     @property
     def data_per_line(self) -> int:
@@ -90,19 +84,24 @@ class Layout:
 
 def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
                    header_alpha: Alphabet, redundancy_pct: float | None,
-                   parity_symbols: int | None) -> Layout:
+                   parity_symbols: int | None, max_interleave: int | None = None,
+                   clamp_width: bool = False) -> Layout:
     """Loest iterativ k, r, interleave, ln_width aus --width + --redundancy
     (oder --parity-symbols). parity_symbols ist die Paritaet JE ZEILE und wird
     (aufgerundet) gleichmaessig auf die Codewoerter verteilt.
     ln_width haengt von total_lines ab, total_lines haengt von k ab, k haengt
     (ueber die Restbreite) von ln_width ab - konvergiert aber in 1-2
-    Iterationsschritten, da ln_width sich nur logarithmisch aendert."""
+    Iterationsschritten, da ln_width sich nur logarithmisch aendert.
+    max_interleave: Hoechstzahl Codewoerter je Zeile (Formatversionen < 6: 1,
+    None = beliebig). Passt --width damit nicht, wird bei clamp_width auf die
+    groesstmoegliche Breite gekuerzt (Layout.width_clamped), sonst ValueError."""
     cw = crc_width_for(header_alpha)
     max_n = payload_alpha.size - 1  # RS-Codewortlaenge <= Feldgroesse - 1
     pct = DEFAULT_REDUNDANCY_PCT if redundancy_pct is None else redundancy_pct
     if parity_symbols is None and pct <= 0:
         raise ValueError(f"--redundancy muss > 0 sein, nicht {pct}")
 
+    max_remaining = None if max_interleave is None else max_interleave * max_n
     ln_width = 1
     for _ in range(20):
         remaining = width - cw - ln_width
@@ -111,6 +110,8 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
                 f"--width {width} ist zu klein (Header-Alphabet-Felder allein "
                 f"brauchen schon {cw + ln_width} Symbole)"
             )
+        if max_remaining is not None:
+            remaining = min(remaining, max_remaining)
         interleave = ceil_div(remaining, max_n)
         n = remaining // interleave  # Laenge jedes Codeworts (<= max_n)
         if parity_symbols is not None:
@@ -132,8 +133,16 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
     else:
         raise ValueError("Layout-Berechnung konvergiert nicht (unerwartet)")
 
+    # erst nach der Konvergenz pruefen, ln_width steht dann fest
+    clamped = max_remaining is not None and width - cw - ln_width > max_remaining
+    if clamped and not clamp_width:
+        raise ValueError(
+            f"--width {width} ist fuer diese Formatversion zu gross "
+            f"(maximal {cw + ln_width + max_remaining} bei diesem Alphabet und dieser Dateigroesse)"
+        )
+
     return Layout(k=k, r=r, interleave=interleave, ln_width=ln_width, crc_width=cw,
-                  total_lines=total_lines)
+                  total_lines=total_lines, width_clamped=clamped)
 
 
 class LineCode:
@@ -177,9 +186,10 @@ class LineCode:
 
 
 def build_payload_line(line_number: int, data_block, code: LineCode, ln_width: int, crc_width: int,
-                       payload_alpha: Alphabet, header_alpha: Alphabet) -> str:
+                       payload_alpha: Alphabet, header_alpha: Alphabet, wide_crc: bool) -> str:
+    """wide_crc: siehe Format.crc_is_wide."""
     encoded = code.encode(data_block)
-    crc = symbols_crc32(data_block, crc_is_wide(FORMAT_VERSION, payload_alpha.bits_per_symbol))
+    crc = symbols_crc32(data_block, wide_crc)
     ln_digits = int_to_digits(line_number, ln_width, header_alpha.size)
     crc_digits = int_to_digits(crc, crc_width, header_alpha.size)
     return header_alpha.symbols_to_text(ln_digits + crc_digits) + payload_alpha.symbols_to_text(encoded)
@@ -208,7 +218,7 @@ def parse_payload_line(raw: str, code: LineCode, ln_width: int, crc_width: int,
                        wide_crc: bool) -> LineResult | None:
     """Parst eine Roh-Zeile. Rueckgabe None fuer eine komplett leere Zeile
     (vom Aufrufer wie eine Luecke zu behandeln), sonst ein LineResult.
-    wide_crc: siehe crc_is_wide."""
+    wide_crc: siehe Format.crc_is_wide."""
     raw = raw.strip()
     if not raw:
         return None

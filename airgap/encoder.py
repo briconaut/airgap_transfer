@@ -8,11 +8,9 @@ import zlib
 from dataclasses import dataclass
 
 from .alphabets import Alphabet
-from .framing import (
-    COLUMN_SEPARATOR, Layout, LineCode, arrange_columns, build_payload_line, byte_offset_of_line,
-    compute_layout,
-)
-from .header import DOCUMENT_ID_WIDTH, build_header_lines, pack_header
+from .formats import Format, get_format
+from .framing import COLUMN_SEPARATOR, Layout, LineCode, arrange_columns, build_payload_line, byte_offset_of_line
+from .header import DOCUMENT_ID_WIDTH, build_header_lines
 from .progress import ProgressBar
 from .rs_codec import GaloisField
 from .scramble import scramble_block
@@ -30,13 +28,17 @@ class EncodedPage:
 
 
 def plan_layout(data: bytes, width: int, payload_alpha: Alphabet, header_alpha: Alphabet,
-                redundancy_pct: float | None, parity_symbols: int | None) -> Layout:
-    """Berechnet das Zeilenlayout (k, r, Zeilennummernbreite, ...) fuer `data`."""
+                redundancy_pct: float | None, parity_symbols: int | None,
+                fmt: Format | None = None, clamp_width: bool = False) -> Layout:
+    """Berechnet das Zeilenlayout (k, r, Zeilennummernbreite, ...) fuer `data`
+    in Formatversion `fmt` (Default: aktuelle Version). clamp_width: siehe
+    Format.compute_layout."""
+    fmt = fmt or get_format()
     total_data_symbols = ceil_div(len(data) * 8, payload_alpha.bits_per_symbol)
-    return compute_layout(
+    return fmt.compute_layout(
         width=width, total_data_symbols=total_data_symbols,
         payload_alpha=payload_alpha, header_alpha=header_alpha,
-        redundancy_pct=redundancy_pct, parity_symbols=parity_symbols,
+        redundancy_pct=redundancy_pct, parity_symbols=parity_symbols, clamp_width=clamp_width,
     )
 
 
@@ -51,15 +53,21 @@ def encode_document(data: bytes, layout: Layout, payload_alpha: Alphabet,
                     header_alpha: Alphabet, preset: str | None, text_encoding: int,
                     filename: str, scrambled: bool, lines_per_page: int | None = None,
                     columns: int = 1, progress: bool = False,
-                    progress_label: str = "Encoding") -> list[EncodedPage]:
-    """Kodiert `data` vollstaendig. lines_per_page=None: eine einzige Seite.
-    preset: Preset-Name oder None fuer ein Custom-Alphabet (siehe pack_header).
+                    progress_label: str = "Encoding", fmt: Format | None = None) -> list[EncodedPage]:
+    """Kodiert `data` vollstaendig in Formatversion `fmt` (Default: aktuelle
+    Version; `layout` muss mit derselben Version berechnet sein, siehe
+    plan_layout). lines_per_page=None: eine einzige Seite.
+    preset: Preset-Name oder None fuer ein Custom-Alphabet (siehe Format.pack_header).
     columns: nur fuer die Breite der Header-Zeilen (siehe page_line_width).
     Rueckgabe: Liste der Seiten (jede mit eigener Praeambel und Header-Kopie)."""
+    fmt = fmt or get_format()
+    if scrambled and not fmt.supports_scrambling:
+        raise ValueError(f"Formatversion {fmt.version} kennt keine Verwuerfelung")
     k_line = layout.data_per_line
     total_lines = layout.total_lines
     bits_per_symbol = payload_alpha.bits_per_symbol
     code = LineCode(layout.k, layout.r, layout.interleave, GaloisField(bits_per_symbol))
+    wide_crc = fmt.crc_is_wide(bits_per_symbol)
 
     # Nutzdaten in Bloecke aufteilen (letzter Block mit 0 aufgefuellt)
     data_symbols = payload_alpha.bytes_to_symbols(data)
@@ -76,7 +84,7 @@ def encode_document(data: bytes, layout: Layout, payload_alpha: Alphabet,
             block = scramble_block(block, i, document_id, bits_per_symbol)
         payload_lines.append(
             build_payload_line(i, block, code, layout.ln_width, layout.crc_width,
-                               payload_alpha, header_alpha)
+                               payload_alpha, header_alpha, wide_crc)
         )
         bar.update(i + 1)
     bar.done()
@@ -92,7 +100,7 @@ def encode_document(data: bytes, layout: Layout, payload_alpha: Alphabet,
         end = min(start + lines_per_page, total_lines)
         byte_start = byte_offset_of_line(start, k_line, bits_per_symbol)
         byte_end = min(byte_offset_of_line(end, k_line, bits_per_symbol), len(data))
-        header_bytes = pack_header(
+        header_bytes = fmt.pack_header(
             payload_alpha, preset, layout.k, layout.r, layout.interleave, len(data), sha256,
             layout.ln_width, filename,
             document_id=document_id, page_count=page_count, page_number=page_number,

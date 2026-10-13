@@ -54,12 +54,13 @@ from dataclasses import dataclass, field
 
 from .alphabets import HEADER_ALPHABET, Alphabet
 from .framing import (
-    LineCode, LineResult, LineStatus, byte_offset_of_line, crc_is_wide, crc_width_for, parse_payload_line,
+    LineCode, LineResult, LineStatus, byte_offset_of_line, crc_width_for, parse_payload_line,
     reflow_joined_lines, total_lines_for, unarrange_columns,
 )
+from .formats import get_format, unpack_header
 from .header import (
     HEADER_COPIES, TEXT_ENCODING_NAMES, TEXT_ENCODING_TO_CODEC, HeaderError, HeaderMeta,
-    find_preamble_positions, parse_header_lines, parse_preamble, unpack_header,
+    find_preamble_positions, parse_header_lines, parse_preamble,
 )
 from .rs_codec import GaloisField
 from .scramble import scramble_block
@@ -396,7 +397,7 @@ class DecodeContext:
         self.payload_alpha = Alphabet(m.payload_chars)
         self.code = LineCode(m.k, m.r, m.interleave, GaloisField(self.bits_per_symbol))
         self.crc_width = crc_width_for(self.header_alpha)
-        self.wide_crc = crc_is_wide(m.version, self.bits_per_symbol)
+        self.wide_crc = get_format(m.version).crc_is_wide(self.bits_per_symbol)
         self.total_lines = total_lines_for(m.total_file_size, self.k_line, self.bits_per_symbol)
 
     @property
