@@ -41,7 +41,7 @@ DEFAULT_ALPHABET = HEADER_ALPHABET
 # ascii64: alle Buchstaben (A-Z, a-z), alle Ziffern (0-9) und +/-.
 # Schliesst die im Default-Preset ausgeschlossenen Verwechslungspaare
 # (0/O, 1/I/l, 5/S, 8/B usw.) bewusst EIN — nutzt Terminals/Fonts, die diese
-# Paare zuverlässig darstellen. Gleiche Dichte wie Default (GF(64), 6 Bit/Symbol),
+# Paare zuverlaessig darstellen. Gleiche Dichte wie Default (GF(64), 6 Bit/Symbol),
 # aber breitere Zeichenauswahl fuer rein 7-Bit-ASCII-Umgebungen.
 PRESET_ASCII64 = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

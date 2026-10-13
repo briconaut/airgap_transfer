@@ -1,5 +1,5 @@
 """
-Header-Format (siehe Design-Notizen der Grilling-Session, Runden 6-15):
+Header-Format:
 
 Praeambel (genau 1x, KEINE Wiederholung, akzeptiertes Restrisiko):
     [N: 4 Header-Alphabet-Symbole][Check: 1 Symbol]
@@ -13,7 +13,7 @@ Header-Koerper (3x wiederholt, jede Zeile mit Praefix):
     (bis zu 3) Kopien jeder Position, setzt den Header wieder zusammen.
 
 Header-Rohbytes (das, was bit-geslict wird):
-    magic:            1 Byte  (Formatversion, aktuell 4; 3 wird weiterhin gelesen)
+    magic:            1 Byte  (Formatversion, aktuell 5; 3 und 4 werden weiterhin gelesen)
     [ab Version 4] flags: 1 Byte (Bit 0 = Nutzdaten verwuerfelt, siehe scramble.py;
                       Version 3 hat kein flags-Feld und gilt als unverwuerfelt)
     alphabet_mode:    1 Byte  (0 = Standard-Preset, 1 = Custom-Alphabet)
@@ -39,6 +39,14 @@ Header-Rohbytes (das, was bit-geslict wird):
     filename_len:     1 Byte
     filename:         filename_len Byte (UTF-8)
 
+Versionsunterschiede beim Lesen:
+    3 -> 4: flags-Byte (Verwuerfelung) eingefuehrt.
+    4 -> 5: Das CRC32 jeder Nutzdatenzeile deckt bei Alphabeten mit mehr als
+            8 Bit/Symbol (GF512) das VOLLSTAENDIGE Symbol ab (2 Byte/Symbol,
+            siehe framing.symbols_crc32); bis Version 4 wurde dort nur das
+            untere Byte jedes Symbols erfasst. Fuer Alphabete <= 256 Zeichen
+            sind Version 4 und 5 bit-identisch.
+
 Seitenteilung (encode.py --lines):
     Jede Seite traegt eine VOLLSTAENDIGE Kopie dieses Headers (inkl. Praeambel
     und 3-facher Wiederholung, siehe unten) - nur page_number/page_checksum
@@ -50,35 +58,111 @@ Seitenteilung (encode.py --lines):
     gesamte Datei (degenerierter Einzelseiten-Fall, gleicher Code-Pfad).
 """
 import struct
-from alphabets import Alphabet, HEADER_ALPHABET
+from collections import Counter
+from dataclasses import dataclass
 
-FORMAT_VERSION = 4
-SUPPORTED_FORMAT_VERSIONS = (3, 4)  # 3 = ohne flags-Byte (nur Lesen)
+from .alphabets import (
+    Alphabet, ENCODING_UTF8, ENCODING_UTF16LE, ENCODING_UTF32LE, ENCODING_UTF32BE,
+)
+from .util import digits_to_int, int_to_digits
+
+FORMAT_VERSION = 5
+SUPPORTED_FORMAT_VERSIONS = (3, 4, 5)  # 3 = ohne flags-Byte, 4 = CRC nur unteres Symbolbyte (nur Lesen)
+FIRST_VERSION_WITH_FLAGS = 4
+FIRST_VERSION_WITH_WIDE_CRC = 5
 FLAG_SCRAMBLED = 0x01
 DOCUMENT_ID_WIDTH = 8  # Byte, siehe pack_header
+SHA256_WIDTH = 32
 TEXT_ENCODING_UTF8 = 0
 TEXT_ENCODING_UTF16LE = 1
 TEXT_ENCODING_UTF32LE = 2
 TEXT_ENCODING_UTF32BE = 3
+
+# text_encoding-Feld <-> Python-Codec der Ausgabedatei <-> Anzeigename.
+# Einzige Stelle fuer diese Zuordnung (encode.py, decode.py und reframe.py
+# benutzen sie alle).
+TEXT_ENCODING_TO_CODEC = {
+    TEXT_ENCODING_UTF8: ENCODING_UTF8,
+    TEXT_ENCODING_UTF16LE: ENCODING_UTF16LE,
+    TEXT_ENCODING_UTF32LE: ENCODING_UTF32LE,
+    TEXT_ENCODING_UTF32BE: ENCODING_UTF32BE,
+}
+CODEC_TO_TEXT_ENCODING = {codec: enc for enc, codec in TEXT_ENCODING_TO_CODEC.items()}
+TEXT_ENCODING_NAMES = {
+    TEXT_ENCODING_UTF8: "UTF-8",
+    TEXT_ENCODING_UTF16LE: "UTF-16LE",
+    TEXT_ENCODING_UTF32LE: "UTF-32LE",
+    TEXT_ENCODING_UTF32BE: "UTF-32BE",
+}
+
 PREAMBLE_N_WIDTH = 4       # Symbole fuer die Header-Zeilenanzahl N
 PREAMBLE_CHECK_WIDTH = 1   # Symbole fuer die Pruefsumme
+PREAMBLE_LEN = PREAMBLE_N_WIDTH + PREAMBLE_CHECK_WIDTH
 HEADER_COPIES = 3
 HEADER_COPY_IDX_WIDTH = 1  # 1..3, passt in 1 Symbol (Alphabetgroesse >= 3)
 HEADER_LINE_IDX_WIDTH = 2  # bis zu 64^2=4096 Header-Zeilen (immer genug)
+HEADER_PREFIX_WIDTH = HEADER_COPY_IDX_WIDTH + HEADER_LINE_IDX_WIDTH
+
+_UINT8_MAX = 0xFF
+_UINT16_MAX = 0xFFFF
+_UINT64_MAX = 0xFFFF_FFFF_FFFF_FFFF
+MAX_PAGE_COUNT = _UINT16_MAX  # page_count ist ein uint16-Feld
 
 
 class HeaderError(ValueError):
-    """Header nicht lesbar/nicht rekonstruierbar (harter Abbruch, siehe Design Q4/Runde15)."""
+    """Header nicht lesbar/nicht rekonstruierbar (diese Seite wird uebersprungen)."""
+
+
+@dataclass(frozen=True)
+class HeaderMeta:
+    """Inhalt eines entpackten Seiten-Headers (siehe Modul-Docstring)."""
+    version: int
+    scrambled: bool
+    is_custom_alphabet: bool
+    alphabet_chars: str | None
+    text_encoding: int
+    document_id: bytes
+    page_count: int
+    page_number: int
+    page_checksum: int
+    k: int
+    r: int
+    total_file_size: int
+    sha256: bytes
+    ln_width: int
+    filename: str
 
 
 # ---------------------------------------------------------------------------
 # Rohbyte-Packung
 # ---------------------------------------------------------------------------
 
+def _check_range(name: str, value: int, maximum: int):
+    if not 0 <= value <= maximum:
+        raise ValueError(f"{name}={value} liegt ausserhalb des Header-Feldbereichs 0..{maximum}")
+
+
 def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r: int,
-                 total_file_size: int, sha256_digest: bytes, ln_width: int,
-                 filename: str, document_id: bytes, page_count: int, page_number: int,
-                 page_checksum: int, text_encoding: int, scrambled: bool = False) -> bytes:
+                total_file_size: int, sha256_digest: bytes, ln_width: int,
+                filename: str, document_id: bytes, page_count: int, page_number: int,
+                page_checksum: int, text_encoding: int, scrambled: bool = False) -> bytes:
+    if text_encoding not in TEXT_ENCODING_TO_CODEC:
+        raise ValueError(f"text_encoding muss eines von {tuple(TEXT_ENCODING_TO_CODEC)} sein")
+    if len(document_id) != DOCUMENT_ID_WIDTH:
+        raise ValueError(f"document_id muss {DOCUMENT_ID_WIDTH} Byte lang sein")
+    if len(sha256_digest) != SHA256_WIDTH:
+        raise ValueError(f"sha256_digest muss {SHA256_WIDTH} Byte lang sein")
+    if page_count > MAX_PAGE_COUNT:
+        raise ValueError(
+            f"{page_count} Seiten passen nicht ins Header-Feld (maximal {MAX_PAGE_COUNT}) - "
+            f"--lines/--columns vergroessern"
+        )
+    _check_range("page_number", page_number, _UINT16_MAX)
+    _check_range("k", k, _UINT16_MAX)
+    _check_range("r", r, _UINT16_MAX)
+    _check_range("total_file_size", total_file_size, _UINT64_MAX)
+    _check_range("ln_width", ln_width, _UINT8_MAX)
+
     out = bytearray()
     out.append(FORMAT_VERSION)
     out.append(FLAG_SCRAMBLED if scrambled else 0)
@@ -91,30 +175,26 @@ def pack_header(payload_alphabet: Alphabet, is_custom_alphabet: bool, k: int, r:
         chars = payload_alphabet.chars.encode("utf-8")
         out.extend(struct.pack(">H", len(chars)))
         out.extend(chars)
-    valid_encodings = (TEXT_ENCODING_UTF8, TEXT_ENCODING_UTF16LE, TEXT_ENCODING_UTF32LE, TEXT_ENCODING_UTF32BE)
-    if text_encoding not in valid_encodings:
-        raise ValueError(f"text_encoding muss eines von {valid_encodings} sein")
     out.append(text_encoding)
-    if len(document_id) != DOCUMENT_ID_WIDTH:
-        raise ValueError(f"document_id muss {DOCUMENT_ID_WIDTH} Byte lang sein")
     out.extend(document_id)
-    out.extend(struct.pack(">H", page_count))
-    out.extend(struct.pack(">H", page_number))
-    out.extend(struct.pack(">I", page_checksum & 0xFFFFFFFF))
-    out.extend(struct.pack(">H", k))
-    out.extend(struct.pack(">H", r))
-    out.extend(struct.pack(">Q", total_file_size))
-    if len(sha256_digest) != 32:
-        raise ValueError("sha256_digest muss 32 Byte lang sein")
+    out.extend(struct.pack(">HHIHHQ", page_count, page_number, page_checksum & 0xFFFFFFFF,
+                           k, r, total_file_size))
     out.extend(sha256_digest)
     out.append(ln_width)
-    name_bytes = filename.encode("utf-8")[:255]
+    name_bytes = _truncate_utf8(filename, _UINT8_MAX)
     out.append(len(name_bytes))
     out.extend(name_bytes)
     return bytes(out)
 
 
-def unpack_header(data: bytes) -> dict:
+def _truncate_utf8(text: str, max_bytes: int) -> bytes:
+    """UTF-8-Kodierung von `text`, auf hoechstens `max_bytes` gekuerzt, ohne
+    ein Mehrbyte-Zeichen zu zerschneiden (sonst waere der Name beim Lesen
+    kein gueltiges UTF-8 mehr)."""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore").encode("utf-8")
+
+
+def unpack_header(data: bytes) -> HeaderMeta:
     pos = 0
 
     def take(n):
@@ -129,32 +209,29 @@ def unpack_header(data: bytes) -> dict:
     if version not in SUPPORTED_FORMAT_VERSIONS:
         raise HeaderError(
             f"Formatversion {version} wird von diesem Decoder nicht unterstuetzt "
-            f"(bekannt: {SUPPORTED_FORMAT_VERSIONS}) - harter Abbruch statt Best-Effort-Versuch."
+            f"(bekannt: {SUPPORTED_FORMAT_VERSIONS})."
         )
-    flags = take(1)[0] if version >= 4 else 0
+    flags = take(1)[0] if version >= FIRST_VERSION_WITH_FLAGS else 0
     is_custom = take(1)[0] == 1
     alphabet_chars = None
-    if is_custom:
-        alen = struct.unpack(">H", take(2))[0]
-        alphabet_chars = take(alen).decode("utf-8")
-    text_encoding = take(1)[0]
-    document_id = take(DOCUMENT_ID_WIDTH)
-    page_count = struct.unpack(">H", take(2))[0]
-    page_number = struct.unpack(">H", take(2))[0]
-    page_checksum = struct.unpack(">I", take(4))[0]
-    k = struct.unpack(">H", take(2))[0]
-    r = struct.unpack(">H", take(2))[0]
-    total_file_size = struct.unpack(">Q", take(8))[0]
-    sha256_digest = take(32)
-    ln_width = take(1)[0]
-    name_len = take(1)[0]
-    filename = take(name_len).decode("utf-8") if name_len else ""
+    try:
+        if is_custom:
+            (alen,) = struct.unpack(">H", take(2))
+            alphabet_chars = take(alen).decode("utf-8")
+        text_encoding = take(1)[0]
+        document_id = take(DOCUMENT_ID_WIDTH)
+        page_count, page_number, page_checksum, k, r, total_file_size = struct.unpack(">HHIHHQ", take(20))
+        sha256_digest = take(SHA256_WIDTH)
+        ln_width = take(1)[0]
+        name_len = take(1)[0]
+        filename = take(name_len).decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise HeaderError(f"Header enthaelt ungueltiges UTF-8 ({e})") from e
 
-    return dict(
-        version=version, scrambled=bool(flags & FLAG_SCRAMBLED), is_custom_alphabet=is_custom, alphabet_chars=alphabet_chars,
-        text_encoding=text_encoding,
-        document_id=document_id, page_count=page_count, page_number=page_number,
-        page_checksum=page_checksum,
+    return HeaderMeta(
+        version=version, scrambled=bool(flags & FLAG_SCRAMBLED), is_custom_alphabet=is_custom,
+        alphabet_chars=alphabet_chars, text_encoding=text_encoding, document_id=document_id,
+        page_count=page_count, page_number=page_number, page_checksum=page_checksum,
         k=k, r=r, total_file_size=total_file_size, sha256=sha256_digest,
         ln_width=ln_width, filename=filename,
     )
@@ -165,56 +242,49 @@ def unpack_header(data: bytes) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_preamble(num_header_lines: int, header_alpha: Alphabet) -> str:
-    base = header_alpha.size
-    if not (0 <= num_header_lines < base ** PREAMBLE_N_WIDTH):
-        raise ValueError("Header zu gross fuer die Praeambel-Feldbreite")
-    digits = []
-    n = num_header_lines
-    for _ in range(PREAMBLE_N_WIDTH):
-        digits.append(n % base)
-        n //= base
-    digits.reverse()
-    check = sum(digits) % base
+    try:
+        digits = int_to_digits(num_header_lines, PREAMBLE_N_WIDTH, header_alpha.size)
+    except ValueError as e:
+        raise ValueError("Header zu gross fuer die Praeambel-Feldbreite") from e
+    check = sum(digits) % header_alpha.size
     return header_alpha.symbols_to_text(digits + [check])
 
 
-def parse_preamble(line: str, header_alpha: Alphabet):
-    """Rueckgabe: num_header_lines. Wirft HeaderError bei Pruefsummenfehler."""
-    expected_len = PREAMBLE_N_WIDTH + PREAMBLE_CHECK_WIDTH
-    if len(line) != expected_len:
+def parse_preamble(line: str, header_alpha: Alphabet) -> int:
+    """Rueckgabe: num_header_lines. Wirft HeaderError bei Laengen-,
+    Zeichen- oder Pruefsummenfehler."""
+    if len(line) != PREAMBLE_LEN:
         raise HeaderError(
-            f"Praeambel hat {len(line)} statt {expected_len} Zeichen - Datei nicht lesbar "
+            f"Praeambel hat {len(line)} statt {PREAMBLE_LEN} Zeichen - Seite nicht lesbar "
             f"(Praeambel ist nicht redundant abgesichert, akzeptiertes Restrisiko)."
         )
-    symbols = header_alpha.text_to_symbols(line)
+    try:
+        symbols = header_alpha.text_to_symbols(line)
+    except ValueError as e:
+        raise HeaderError(f"Praeambel nicht lesbar ({e})") from e
     digits, check = symbols[:PREAMBLE_N_WIDTH], symbols[PREAMBLE_N_WIDTH]
-    base = header_alpha.size
-    if sum(digits) % base != check:
-        raise HeaderError("Praeambel-Pruefsumme stimmt nicht - Datei nicht lesbar.")
-    n = 0
-    for d in digits:
-        n = n * base + d
-    return n
+    if sum(digits) % header_alpha.size != check:
+        raise HeaderError("Praeambel-Pruefsumme stimmt nicht - Seite nicht lesbar.")
+    return digits_to_int(digits, header_alpha.size)
 
 
-def find_preamble_positions(lines, header_alpha: Alphabet):
+def find_preamble_positions(lines, header_alpha: Alphabet) -> list[int]:
     """Findet alle Positionen in `lines`, an denen eine gueltige Praeambel
     steht (fuer Mehrseiten-Decode: jede Seite hat ihre eigene Praeambel,
     irgendwo im - moeglicherweise aus mehreren Quellen zusammengefuegten
     und/oder gemischt sortierten - Zeilenstrom). Eine Praeambel ist genau
-    PREAMBLE_N_WIDTH+PREAMBLE_CHECK_WIDTH (5) Zeichen lang und hat eine
-    gueltige Pruefsumme - beides zusammen macht eine zufaellige Kollision mit
-    einer (viel laengeren) Header-/Nutzdatenzeile praktisch ausgeschlossen.
+    PREAMBLE_LEN (5) Zeichen lang und hat eine gueltige Pruefsumme - beides
+    zusammen macht eine zufaellige Kollision mit einer (viel laengeren)
+    Header-/Nutzdatenzeile praktisch ausgeschlossen.
     Rueckgabe: sortierte Liste von Indizes in `lines`."""
-    expected_len = PREAMBLE_N_WIDTH + PREAMBLE_CHECK_WIDTH
     positions = []
     for idx, raw in enumerate(lines):
         s = raw.strip()
-        if len(s) != expected_len:
+        if len(s) != PREAMBLE_LEN:
             continue
         try:
             parse_preamble(s, header_alpha)
-        except ValueError:
+        except HeaderError:
             continue
         positions.append(idx)
     return positions
@@ -225,7 +295,7 @@ def find_preamble_positions(lines, header_alpha: Alphabet):
 # ---------------------------------------------------------------------------
 
 def _content_width(line_width: int) -> int:
-    w = line_width - HEADER_COPY_IDX_WIDTH - HEADER_LINE_IDX_WIDTH
+    w = line_width - HEADER_PREFIX_WIDTH
     if w < 1:
         raise ValueError(f"--width {line_width} ist zu klein fuer Header-Zeilen")
     return w
@@ -237,19 +307,18 @@ def build_header_lines(header_bytes: bytes, line_width: int, header_alpha: Alpha
     symbols = header_alpha.bytes_to_symbols(header_bytes)
     cw = _content_width(line_width)
     chunks = [symbols[i:i + cw] for i in range(0, len(symbols), cw)] or [[]]
-    n = len(chunks)
 
-    preamble = build_preamble(n, header_alpha)
+    preamble = build_preamble(len(chunks), header_alpha)
 
     lines = []
     for copy_idx in range(1, HEADER_COPIES + 1):
         for line_idx, chunk in enumerate(chunks):
-            prefix = [copy_idx] + _int_to_digits(line_idx, HEADER_LINE_IDX_WIDTH, header_alpha.size)
+            prefix = [copy_idx] + int_to_digits(line_idx, HEADER_LINE_IDX_WIDTH, header_alpha.size)
             lines.append(header_alpha.symbols_to_text(prefix + chunk))
     return preamble, lines
 
 
-def parse_header_lines(preamble_line: str, body_lines, line_width: int, header_alpha: Alphabet) -> bytes:
+def parse_header_lines(preamble_line: str, body_lines, header_alpha: Alphabet) -> bytes:
     n = parse_preamble(preamble_line, header_alpha)
     expected_total = n * HEADER_COPIES
     # Bewusst KEIN harter Abbruch bei zu wenigen Zeilen: jede Header-Zeile
@@ -266,57 +335,32 @@ def parse_header_lines(preamble_line: str, body_lines, line_width: int, header_a
             symbols = header_alpha.text_to_symbols(raw.strip())
         except ValueError:
             continue  # unlesbare Zeile: einfach ignorieren, zaehlt als fehlende Kopie
-        if len(symbols) < HEADER_COPY_IDX_WIDTH + HEADER_LINE_IDX_WIDTH:
+        if len(symbols) < HEADER_PREFIX_WIDTH:
             continue
         copy_idx = symbols[0]
-        line_idx = _digits_to_int(symbols[1:1 + HEADER_LINE_IDX_WIDTH], header_alpha.size)
-        content = symbols[1 + HEADER_LINE_IDX_WIDTH:]
+        if not 1 <= copy_idx <= HEADER_COPIES:
+            continue  # Kopie-Index verfaelscht (oder gar keine Header-Zeile): nicht mitzaehlen
+        line_idx = digits_to_int(symbols[HEADER_COPY_IDX_WIDTH:HEADER_PREFIX_WIDTH], header_alpha.size)
         if line_idx in by_line_idx:
-            by_line_idx[line_idx].append(content)
+            by_line_idx[line_idx].append(symbols[HEADER_PREFIX_WIDTH:])
 
     all_symbols = []
     for i in range(n):
         copies = by_line_idx[i]
         if not copies:
-            raise HeaderError(f"Header-Zeile {i}: keine einzige Kopie lesbar - Abbruch.")
+            raise HeaderError(f"Header-Zeile {i}: keine einzige Kopie lesbar.")
         all_symbols.extend(_majority_vote(copies))
 
-    header_bytes = header_alpha.symbols_to_bytes(all_symbols)  # floor-trick, kein expected_length noetig
-    return header_bytes
+    return header_alpha.symbols_to_bytes(all_symbols)  # floor-trick, kein expected_length noetig
 
 
 def _majority_vote(copies):
     """copies: Liste von Symbol-Listen (i.d.R. bis zu 3, ggf. unterschiedlich
     lang bei Kopien mit Leseartefakten). Mehrheitsentscheid pro Position ueber
-    die Kopien, die an dieser Position ueberhaupt ein Symbol haben."""
+    die Kopien, die an dieser Position ueberhaupt ein Symbol haben (bei
+    Gleichstand gewinnt die zuerst gelesene Kopie)."""
     max_len = max(len(c) for c in copies)
-    out = []
-    for pos in range(max_len):
-        votes = {}
-        for c in copies:
-            if pos < len(c):
-                votes[c[pos]] = votes.get(c[pos], 0) + 1
-        if not votes:
-            raise HeaderError("Header-Position ohne jede lesbare Kopie - Abbruch.")
-        best = max(votes.items(), key=lambda kv: kv[1])[0]
-        out.append(best)
-    return out
-
-
-def _int_to_digits(value: int, width: int, base: int):
-    digits = []
-    v = value
-    for _ in range(width):
-        digits.append(v % base)
-        v //= base
-    digits.reverse()
-    if v != 0:
-        raise ValueError(f"Wert {value} passt nicht in {width} Symbole (Basis {base})")
-    return digits
-
-
-def _digits_to_int(digits, base: int) -> int:
-    v = 0
-    for d in digits:
-        v = v * base + d
-    return v
+    return [
+        Counter(c[pos] for c in copies if pos < len(c)).most_common(1)[0][0]
+        for pos in range(max_len)
+    ]

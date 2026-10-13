@@ -13,13 +13,17 @@ sich über stdin/stdout in eine externe Pipeline einhängen.
 
 ```bash
 # Encodieren
-python3 encode.py geheim.bin -o geheim.txt --width 100 --redundancy 20
-cat geheim.bin | python3 encode.py --width 100 > geheim.txt   # via stdin/stdout
+python3 bin/encode.py geheim.bin -o geheim.txt --width 100 --redundancy 20
+cat geheim.bin | python3 bin/encode.py --width 100 > geheim.txt   # via stdin/stdout
 
 # Decodieren (Eingabe = OCR-Rohtext)
-python3 decode.py ocr_output.txt -o wiederhergestellt
-python3 decode.py -o wiederhergestellt < ocr_output.txt
+python3 bin/decode.py ocr_output.txt -o wiederhergestellt
+python3 bin/decode.py -o wiederhergestellt < ocr_output.txt
 ```
+
+Die Skripte in `bin/` sind dünne Startskripte für das Paket `airgap/`;
+gleichwertig ist `python3 -m airgap.encode` bzw. `python3 -m airgap.decode`
+aus dem Projektverzeichnis.
 
 ### encode.py
 
@@ -73,7 +77,7 @@ Gesamtstrom oben.
 `decode.py` akzeptiert Seiten in drei Formen, beliebig kombinierbar:
 alle Seiten in einer Datei/stdin (auch in **gemischter Reihenfolge**),
 mehrere einzelne Dateien als separate Argumente, oder ein Glob-Pattern
-(z.B. `python3 decode.py "seite_*.txt" -o wiederhergestellt`). Der Header
+(z.B. `python3 bin/decode.py "seite_*.txt" -o wiederhergestellt`). Der Header
 je Seite ist wie die Präambel nicht redundant über mehrere Seiten
 abgesichert: ist der Header einer einzelnen Seite nicht lesbar, wird nur
 diese Seite übersprungen (ihre Zeilen zählen als fehlend) — erst wenn
@@ -88,6 +92,11 @@ führen zum Abbruch (kein automatisches Aufteilen auf mehrere Dokumente).
   fehlerhaften Zeile), `<output>.part2` (Rest, inkl. nicht rekonstruierbarer
   Stellen als Nullbytes), `<output>.errors.txt`/`.json` (alle fehlerhaften
   Zeilen mit Grund). SHA-256-Prüfung wird in diesem Fall übersprungen.
+
+**Exitcodes von `decode.py`:** `0` vollständig und SHA-256 OK, `1` Abbruch
+(z.B. keine lesbare Seite), `2` ungültige Kommandozeile, `3` unvollständig
+(`.part1`/`.part2` geschrieben), `4` alle Zeilen gelesen, aber SHA-256 stimmt
+nicht. Der Fehlerbericht wird in jedem Fall geschrieben.
 
 **UTF-16LE-/UTF-32-Presets:** `latin128`/`utf8128` unterscheiden sich nur in
 der *Zeichenauswahl* — die Ausgabedatei bleibt in jedem Fall UTF-8. Sechs
@@ -126,7 +135,7 @@ automatisch** an den Rohbytes, ohne die Datei neu zu öffnen und ohne dass ein
 BOM zwingend nötig wäre (funktioniert auch bei einer aus der Gesamtdatei
 herausgeschnittenen Einzelseite ohne führendes BOM, siehe "Seitenteilung"
 oben): das Header-Alphabet ist immer reines 7-Bit-ASCII, und `0x00` ist in
-jedem Alphabet verboten (siehe `alphabets.py`) — ein UTF-8-Strom kann also
+jedem Alphabet verboten (siehe `airgap/alphabets.py`) — ein UTF-8-Strom kann also
 nie ein rohes `0x00`-Byte enthalten, während ASCII als UTF-16LE immer `Byte,
 0x00`-Paare und als UTF-32LE/UTF-32BE immer drei `0x00`-Bytes je Zeichen
 erzeugt. Das UTF-16LE-BOM (`FF FE`) ist ein reiner Byte-Präfix des
@@ -173,11 +182,14 @@ Reed-Solomon dutzende statt einem Fehler sieht. Zwei Gegenmaßnahmen:
 
 - **Verwürfelung (Encoder, Standard):** Die Datensymbole jeder Zeile werden
   vor dem RS-Kodieren mit einem Pseudo-Zufallsstrom XOR-verknüpft
-  (SHAKE-256 aus Dokument-ID und Zeilennummer, siehe `lib/scramble.py`).
+  (SHAKE-256 aus Dokument-ID und Zeilennummer, siehe `airgap/scramble.py`).
   Dadurch entstehen auch bei komprimierten oder stark repetitiven Daten
   keine langen Folgen mehr. Kostet keinen Platz; `--no-scramble` schaltet
   sie ab (nur für Vergleiche/Debugging). Ab Formatversion 4; der Decoder
-  liest Version 3 (unverwürfelt) weiterhin.
+  liest Version 3 (unverwürfelt) weiterhin. Formatversion 5 (aktuell)
+  erweitert das Zeilen-CRC bei den 512er-Presets auf das volle 9-Bit-Symbol;
+  für alle anderen Alphabete sind Version 4 und 5 bit-identisch, ältere
+  Dateien bleiben lesbar.
 - **Längenreparatur (Decoder, immer aktiv):** Hat eine Zeile bis zu 2
   Zeichen zu viel oder zu wenig (oder ist bei richtiger Länge nicht
   korrigierbar), probiert der Decoder Varianten durch, in denen Folgen
@@ -211,9 +223,14 @@ Einfachheit/Risiko) und sind keine Bugs:
   diese eine Seite nicht mehr lesbar (ihre Zeilen zählen als fehlend) - bei
   Seitenteilung betrifft das nur diese eine Seite, nicht die ganze Datei.
 - **Zeilennummer** selbst ist nicht durch das CRC geschützt (CRC deckt nur
-  die Nutzdaten ab). Ein OCR-Fehler ausgerechnet in der Zeilennummer könnte
-  eine Zeile theoretisch an die falsche Position einsortieren, statt als
-  Lücke erkannt zu werden.
+  die Nutzdaten ab). Ein OCR-Fehler in der Zeilennummer macht diese eine
+  Zeile unbrauchbar, beeinträchtigt aber keine anderen Zeilen: Nummern
+  außerhalb des gültigen Bereichs werden verworfen, und kollidiert eine
+  falsche Nummer mit einer vorhandenen Zeile, gewinnt die Zeile, deren
+  Nachbarn zur Nummer passen (sonst wird die Zeile als widersprüchlich
+  gemeldet). Landet eine falsche Nummer ausgerechnet auf einer ohnehin
+  fehlenden Zeile, wird sie dort einsortiert — das fällt dann über die
+  Seiten-Prüfsumme bzw. SHA-256 auf (Exitcode 4).
 - **Geht eine ganze Header-Zeile verloren** (nicht nur eine Kopie davon,
   sondern eine komplette Kopie *und* die Zählung verschiebt sich), kann sich
   in seltenen Fällen die Grenze zwischen Header- und Nutzdatenbereich um eine

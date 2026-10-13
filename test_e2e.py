@@ -1,23 +1,38 @@
+"""End-to-End-Tests fuer encode.py/decode.py/reframe.py/archive2git.py.
+
+Ausfuehren mit 'python3 test_e2e.py' (unittest) oder pytest. Alle Dateien
+landen in einem temporaeren Verzeichnis, das am Ende geloescht wird."""
+import atexit
+import base64
 import glob
 import os
 import random
+import shutil
 import subprocess
 import sys
-import hashlib
+import tarfile
+import tempfile
+import unittest
 
-# lib/ fuer den direkten Import (Alphabet wird in den Hilfsfunktionen benutzt)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-from alphabets import Alphabet, DEFAULT_ALPHABET
-from header import find_preamble_positions, parse_preamble, HEADER_COPIES
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from airgap.alphabets import Alphabet, DEFAULT_ALPHABET
+from airgap.framing import symbols_crc32
+from airgap.header import find_preamble_positions, parse_preamble, HEADER_COPIES
 
 # Pfade zu den Tools relativ zu diesem Skript
-ENCODE  = os.path.join(os.path.dirname(__file__), "bin", "encode.py")
-DECODE  = os.path.join(os.path.dirname(__file__), "bin", "decode.py")
-REFRAME = os.path.join(os.path.dirname(__file__), "bin", "reframe.py")
+ENCODE  = os.path.join(HERE, "bin", "encode.py")
+DECODE  = os.path.join(HERE, "bin", "decode.py")
+REFRAME = os.path.join(HERE, "bin", "reframe.py")
+ARCHIVE2GIT = os.path.join(HERE, "bin", "archive2git.py")
+
+# Exitcodes von decode.py (siehe airgap/decode.py)
+EXIT_INCOMPLETE = 3
+EXIT_HASH_MISMATCH = 4
 
 random.seed(7)
-WORKDIR = "/home/claude/airgap_transfer/e2e"
-os.makedirs(WORKDIR, exist_ok=True)
+WORKDIR = tempfile.mkdtemp(prefix="airgap_e2e_")
+atexit.register(shutil.rmtree, WORKDIR, ignore_errors=True)
 
 
 def run(cmd):
@@ -145,7 +160,7 @@ def test_lost_lines():
         f.write("\n".join(lines))
 
     r2 = run([sys.executable, DECODE, damaged, "-o", out])
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode == EXIT_INCOMPLETE, r2.stderr
     print(" decode stderr:\n", r2.stderr)
 
     assert os.path.exists(f"{out}.part1") and os.path.exists(f"{out}.part2"), "part1/part2 wurden nicht erzeugt!"
@@ -405,7 +420,7 @@ def test_pagination_missing_page():
                 f.write("\n\n\n")
 
     r2 = run([sys.executable, DECODE, damaged, "-o", out])
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode == EXIT_INCOMPLETE, r2.stderr
     print(" decode stderr:", r2.stderr.strip())
 
     with open(f"{out}.errors.txt") as f:
@@ -751,7 +766,7 @@ def test_scrambling():
 
         r = run([sys.executable, DECODE, enc, "--header"])
         assert r.returncode == 0, r.stderr
-        assert f"Verwuerfelt:" in r.stdout and ("nein" if flag else "ja") in r.stdout.split("Verwuerfelt:")[1].split("\n")[0]
+        assert "Verwuerfelt:" in r.stdout and ("nein" if flag else "ja") in r.stdout.split("Verwuerfelt:")[1].split("\n")[0]
 
         r = run([sys.executable, DECODE, enc, "-o", out])
         assert r.returncode == 0, r.stderr
@@ -848,28 +863,152 @@ def test_shift_repair():
     print(" OK: 5 verschobene Zeilen repariert, Datei exakt rekonstruiert")
 
 
+def payload_line_indices(lines):
+    """Indizes der Nutzdatenzeilen einer einseitigen encode.py-Ausgabe."""
+    header_alpha = Alphabet(DEFAULT_ALPHABET)
+    (start,) = find_preamble_positions(lines, header_alpha)
+    first = start + 1 + parse_preamble(lines[start], header_alpha) * HEADER_COPIES
+    return [i for i in range(first, len(lines)) if lines[i].strip()]
+
+
+def test_empty_file():
+    print("== Test 24: leere Eingabedatei ==")
+    src, enc, out = f"{WORKDIR}/t24_src.bin", f"{WORKDIR}/t24_enc.txt", f"{WORKDIR}/t24_out"
+    open(src, "wb").close()
+    r = run([sys.executable, ENCODE, src, "-o", enc])
+    assert r.returncode == 0, r.stderr
+    r = run([sys.executable, DECODE, enc, "-o", out])
+    assert r.returncode == 0, r.stderr
+    assert os.path.getsize(out) == 0, "leere Datei muss leer rekonstruiert werden"
+    print(" OK: leere Datei exakt rekonstruiert")
+
+
+def test_line_number_errors():
+    print("== Test 25: Lesefehler in Zeilennummern ==")
+    src, enc, out = f"{WORKDIR}/t25_src.bin", f"{WORKDIR}/t25_enc.txt", f"{WORKDIR}/t25_out"
+    make_test_file(src, 20_000)
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80"])
+    assert r.returncode == 0, r.stderr
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    idx = payload_line_indices(lines)
+    assert len(idx) > 100
+    # (a) Zeilennummer weit ausserhalb des gueltigen Bereichs, (b) Zeilennummer
+    # einer anderen, vorhandenen Zeile (Kollision). Je nur EIN Zeichen geaendert.
+    lines[idx[5]] = "!" + lines[idx[5]][1:]
+    lines[idx[20]] = "3" + lines[idx[20]][1:]
+    with open(enc, "w") as f:
+        f.write("\n".join(lines))
+    r = run([sys.executable, DECODE, enc, "-o", out])
+    assert r.returncode == EXIT_INCOMPLETE, r.stderr
+    with open(f"{out}.errors.txt") as f:
+        report = f.read()
+    assert "Fehlerhafte/fehlende Zeilen (2):" in report, report
+    assert "Zeile 5: fehlend" in report and "Zeile 20: fehlend" in report, report
+    print(" OK: nur die beiden betroffenen Zeilen fehlen (keine Folgefehler)")
+
+
+def test_hash_mismatch_exit_code():
+    print("== Test 26: Exitcode bei fehlgeschlagener SHA-256-Pruefung ==")
+    src, enc, out = f"{WORKDIR}/t26_src.bin", f"{WORKDIR}/t26_enc.txt", f"{WORKDIR}/t26_out"
+    make_test_file(src, 5_000)
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--no-scramble"])
+    assert r.returncode == 0, r.stderr
+    with open(enc) as f:
+        lines = f.read().split("\n")
+    a, b = payload_line_indices(lines)[3:5]
+    # Zeilennummern zweier Nachbarzeilen vertauschen (Zeilennummernbreite 2):
+    # jede Zeile bleibt fuer sich gueltig, die Datei als Ganzes ist falsch.
+    lines[a], lines[b] = lines[b][:2] + lines[a][2:], lines[a][:2] + lines[b][2:]
+    with open(enc, "w") as f:
+        f.write("\n".join(lines))
+    r = run([sys.executable, DECODE, enc, "-o", out])
+    assert r.returncode == EXIT_HASH_MISMATCH, (r.returncode, r.stderr)
+    with open(f"{out}.errors.txt") as f:
+        assert "SHA-256-Pruefung: FEHLGESCHLAGEN" in f.read()
+    print(" OK: Exitcode", r.returncode)
+
+
+def test_too_many_pages():
+    print("== Test 27: mehr Seiten als das Header-Feld fasst ==")
+    src = f"{WORKDIR}/t27_src.bin"
+    make_test_file(src, 100_000)
+    r = run([sys.executable, ENCODE, src, "-o", f"{WORKDIR}/t27_enc.txt", "--width", "12", "--lines", "1"])
+    assert r.returncode == 2 and "Seiten" in r.stderr and "Traceback" not in r.stderr, r.stderr
+    print(" OK: verstaendliche Fehlermeldung statt Traceback")
+
+
+def test_reframe():
+    print("== Test 28: reframe.py ==")
+    enc, out = f"{WORKDIR}/t28_enc.txt", f"{WORKDIR}/t28_out"
+    b64 = base64.encodebytes(os.urandom(3_001))  # mit Zeilenumbruechen und '='-Padding
+    r = subprocess.run([sys.executable, REFRAME, "-o", enc], input=b64, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    r = run([sys.executable, DECODE, enc, "-o", out])
+    assert r.returncode == 0, r.stderr
+    with open(out, "rb") as f:
+        assert f.read() == b64.replace(b"\n", b"").rstrip(b"=")
+
+    for bad, msg in ((b"QUJD=REVG\n", "nicht am Ende"), (b"QUJD\xc3\xa4\n", "kein gueltiges")):
+        r = subprocess.run([sys.executable, REFRAME], input=bad, capture_output=True, text=False)
+        stderr = r.stderr.decode()
+        assert r.returncode == 1 and msg in stderr and "Traceback" not in stderr, stderr
+    print(" OK: Roundtrip exakt, ungueltige Eingaben sauber abgelehnt")
+
+
+def test_wide_crc():
+    print("== Test 29: CRC erfasst bei GF512 das oberste Symbolbit ==")
+    assert symbols_crc32([0x100], wide=True) != symbols_crc32([0x000], wide=True)
+    assert symbols_crc32([0x100], wide=False) == symbols_crc32([0x000], wide=False)  # alte Variante
+    print(" OK")
+
+
+@unittest.skipUnless(shutil.which("git"), "git nicht installiert")
+def test_archive2git():
+    print("== Test 30: archive2git.py ==")
+    base = tempfile.mkdtemp(dir=WORKDIR)
+    src, repo, tbz = f"{base}/src", f"{base}/repo", f"{base}/a.tar.bz2"
+    os.makedirs(f"{src}/proj/sub")
+    with open(f"{src}/proj/a.txt", "w") as f:
+        f.write("hallo\n")
+    os.link(f"{src}/proj/a.txt", f"{src}/proj/hard.txt")
+    with tarfile.open(tbz, "w:bz2") as tar:
+        tar.add(f"{src}/proj", arcname="proj")
+
+    def git(*args):
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=True).stdout
+
+    os.makedirs(repo)
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    with open(f"{repo}/staged.txt", "w") as f:
+        f.write("gestaged\n")
+    git("add", "staged.txt")
+    git("commit", "-q", "-m", "vorher")
+
+    with open(tbz, "rb") as f:
+        r = subprocess.run([sys.executable, ARCHIVE2GIT, "--strip", "proj"], input=f.read(),
+                           capture_output=True, cwd=repo)
+    assert r.returncode == 0, r.stderr
+    assert git("ls-tree", "-r", "--name-only", "HEAD").split() == ["a.txt", "hard.txt"]
+    assert git("show", "HEAD:hard.txt") == "hallo\n", "Hardlink nicht aufgeloest"
+    assert git("rev-list", "--count", "HEAD").strip() == "2", "bisherige History verloren"
+
+    r = subprocess.run([sys.executable, ARCHIVE2GIT], input=b"kein archiv", capture_output=True, cwd=repo)
+    assert r.returncode == 1 and b"Traceback" not in r.stderr, r.stderr
+    print(" OK: Import als neuer Commit, Hardlink aufgeloest, Fehler sauber gemeldet")
+
+
+def load_tests(loader, tests, pattern):
+    """unittest-Einstieg: jede test_*-Funktion als eigener Testfall, in
+    Definitionsreihenfolge (pytest sammelt die Funktionen direkt)."""
+    suite = unittest.TestSuite()
+    for name, obj in list(globals().items()):
+        if name.startswith("test_") and callable(obj):
+            suite.addTest(unittest.FunctionTestCase(obj))
+    return suite
+
+
 if __name__ == "__main__":
-    test_clean_roundtrip()
-    test_correctable_corruption()
-    test_lost_lines()
-    test_custom_alphabet()
-    test_preset_utf8128()
-    test_joined_lines()
-    test_pagination_basic()
-    test_pagination_shuffled()
-    test_pagination_separate_files()
-    test_pagination_pattern()
-    test_pagination_missing_page()
-    test_preset_utf16le128()
-    test_preset_utf16le256()
-    test_utf16le_pagination_separate_files()
-    test_output_pattern_split()
-    test_output_pattern_split_utf16le_boms()
-    test_output_pattern_single_bom_without_star()
-    test_latin128_saved_as_latin1()
-    test_header_only()
-    test_columns()
-    test_show_preset()
-    test_scrambling()
-    test_shift_repair()
-    print("\nAlle End-to-End-Tests bestanden.")
+    unittest.main()
