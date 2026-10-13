@@ -1,7 +1,11 @@
-import os, random, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+import os
+import random
+import sys
+import unittest
 
-from rs_codec import GaloisField, rs_generator_poly, rs_encode, rs_decode
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from airgap.rs_codec import GaloisField, rs_decode, rs_encode, rs_generator_poly
 
 random.seed(42)
 
@@ -66,7 +70,12 @@ def run_field_tests(m):
         print(f"  r={r}: k={k}, max_correctable={max_correctable} -> Encode/Decode OK")
 
 
-for m in (5, 6, 7, 8, 9):
-    run_field_tests(m)
+class RSCodecTest(unittest.TestCase):
+    def test_all_fields(self):
+        for m in (5, 6, 7, 8, 9):
+            with self.subTest(m=m):
+                run_field_tests(m)
 
-print("\nAlle Kernfaelle bestanden.")
+
+if __name__ == "__main__":
+    unittest.main()

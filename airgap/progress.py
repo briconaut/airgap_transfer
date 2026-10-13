@@ -13,7 +13,8 @@ import sys
 class ProgressBar:
     """Schreibt einen ASCII-Fortschrittsbalken auf stderr.
 
-    Aktualisiert nur alle ~1% (mindestens alle 10 Schritte), um den
+    Zeichnet nur neu, wenn sich der ganzzahlige Prozentwert aendert
+    (hoechstens 101 Ausgaben, unabhaengig von `total`), um den
     flush()-Overhead bei sehr vielen Zeilen gering zu halten.
     """
 
@@ -23,8 +24,6 @@ class ProgressBar:
         self.total = max(total, 1)
         self.enabled = enabled
         self.label = label
-        # Aktualisierungsintervall: alle 1%, aber mindestens alle 10 Schritte
-        self.interval = max(10, self.total // 100)
         self._last_pct = -1
         if enabled:
             self._render(0)
@@ -32,12 +31,9 @@ class ProgressBar:
     def update(self, current: int):
         if not self.enabled:
             return
-        # Nur aktualisieren, wenn sich der Prozentwert geaendert hat
-        # ODER das Intervall erreicht ist (verhindert Ausgabepause am Ende)
-        pct = min(100, int(current * 100 / self.total))
-        if pct == self._last_pct and current % self.interval != 0:
+        pct = self._percent(current)
+        if pct == self._last_pct:
             return
-        self._last_pct = pct
         self._render(current)
 
     def done(self):
@@ -48,8 +44,11 @@ class ProgressBar:
         sys.stderr.write("\n")
         sys.stderr.flush()
 
+    def _percent(self, current: int) -> int:
+        return min(100, current * 100 // self.total)
+
     def _render(self, current: int):
-        pct = min(100, int(current * 100 / self.total))
+        pct = self._last_pct = self._percent(current)
         filled = self.WIDTH * pct // 100
         bar = "=" * filled + "-" * (self.WIDTH - filled)
         prefix = f"{self.label} " if self.label else ""

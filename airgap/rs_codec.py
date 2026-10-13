@@ -171,9 +171,7 @@ def rs_find_errors(err_loc, n: int, gf: GaloisField):
     errs = len(err_loc) - 1
     err_pos = []
     for i in range(n):
-        inv_root = gf.pow(gf.exp[i], gf.size - 2)  # alpha^-i = alpha^((size-1)-i), size-2 stellvertretend über pow
-        # sauberer: alpha^-i direkt ueber Tabelle
-        inv_root = gf.exp[(gf.size - 1 - i) % (gf.size - 1)] if i != 0 else 1
+        inv_root = gf.exp[(gf.size - 1 - i) % (gf.size - 1)]  # alpha^-i = alpha^((size-1)-i)
         if poly_eval(err_loc, inv_root, gf) == 0:
             err_pos.append(n - 1 - i)
     if len(err_pos) != errs:
