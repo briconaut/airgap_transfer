@@ -101,8 +101,8 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
     if parity_symbols is None and pct <= 0:
         raise ValueError(f"--redundancy muss > 0 sein, nicht {pct}")
 
+    max_remaining = None if max_interleave is None else max_interleave * max_n
     ln_width = 1
-    clamped = False
     for _ in range(20):
         remaining = width - cw - ln_width
         if remaining < 2:
@@ -110,13 +110,8 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
                 f"--width {width} ist zu klein (Header-Alphabet-Felder allein "
                 f"brauchen schon {cw + ln_width} Symbole)"
             )
-        if max_interleave is not None and remaining > max_interleave * max_n:
-            if not clamp_width:
-                raise ValueError(
-                    f"--width {width} ist fuer diese Formatversion zu gross "
-                    f"(maximal {cw + ln_width + max_interleave * max_n} bei diesem Alphabet)"
-                )
-            remaining, clamped = max_interleave * max_n, True
+        if max_remaining is not None:
+            remaining = min(remaining, max_remaining)
         interleave = ceil_div(remaining, max_n)
         n = remaining // interleave  # Laenge jedes Codeworts (<= max_n)
         if parity_symbols is not None:
@@ -137,6 +132,14 @@ def compute_layout(width: int, total_data_symbols: int, payload_alpha: Alphabet,
         ln_width = new_ln_width
     else:
         raise ValueError("Layout-Berechnung konvergiert nicht (unerwartet)")
+
+    # erst nach der Konvergenz pruefen, ln_width steht dann fest
+    clamped = max_remaining is not None and width - cw - ln_width > max_remaining
+    if clamped and not clamp_width:
+        raise ValueError(
+            f"--width {width} ist fuer diese Formatversion zu gross "
+            f"(maximal {cw + ln_width + max_remaining} bei diesem Alphabet und dieser Dateigroesse)"
+        )
 
     return Layout(k=k, r=r, interleave=interleave, ln_width=ln_width, crc_width=cw,
                   total_lines=total_lines, width_clamped=clamped)

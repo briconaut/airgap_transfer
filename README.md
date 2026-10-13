@@ -23,6 +23,7 @@ Werkzeuge (alle in `bin/`):
 ```bash
 # Encodieren
 python3 bin/encode.py geheim.bin -o geheim.txt --width 100 --redundancy 20
+python3 bin/encode.py geheim.bin -o geheim.txt --format-version 4   # für älteren decode.py
 cat geheim.bin | python3 bin/encode.py --width 100 > geheim.txt   # via stdin/stdout
 
 # Decodieren (Eingabe = OCR-Rohtext)
@@ -40,15 +41,16 @@ aus dem Projektverzeichnis.
 |---|---|
 | `input` | Eingabedatei (optional, sonst stdin) |
 | `-o/--output` | Ausgabedatei (optional, sonst stdout). Enthält ein `*`, siehe "Seitenteilung" unten |
-| `--width` | Breite einer Nutzdatenzeile in Zeichen **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100). Wird unabhängig vom Alphabet voll ausgenutzt (siehe "Zeilenbreite" unten); mit `--columns` die Breite jeder Spalte |
+| `--format-version` | Formatversion der Ausgabe: 3, 4, 5 oder 6 (Default 6), für Empfänger mit älterem `decode.py`. Bestimmt auch, welche der folgenden Optionen es gibt (siehe "Ältere Formatversionen erzeugen" unten) |
+| `--width` | Breite einer Nutzdatenzeile in Zeichen **inkl.** Zeilennummer-, CRC- und Paritätsfeld (Default 100). Wird unabhängig vom Alphabet voll ausgenutzt (siehe "Zeilenbreite" unten; bis Formatversion 5 begrenzt); mit `--columns` die Breite jeder Spalte |
 | `--preset` | Eingebautes Alphabet-Preset: `default` (64 Zeichen, konfusionsarm), `ascii64` (64 Zeichen, alle Buchstaben+Ziffern), `latin128` (128 Zeichen, ASCII + Latin-1-Diakritika, GF128), `utf8128` (128 Zeichen, ASCII + Latin-Extended-A-Diakritika, GF128), `utf16le128`/`utf16le256`/`utf32le128`/`utf32le256`/`utf32le512`/`utf32be512` (siehe "UTF-16LE-/UTF-32-Presets" unten). Schließt `--alphabet` aus |
 | `--alphabet` | Custom-Alphabet-String (Länge muss 32/64/128/256/512 sein). Schließt `--preset` aus. Default: eingebautes 64er-Preset |
 | `--redundancy` | Parität in % von k (Default 20.0) |
 | `--parity-symbols` | Absolute Zahl Paritätssymbole je Zeile, statt `--redundancy` (wird aufgerundet gleichmäßig auf die Codewörter der Zeile verteilt) |
 | `--lines` | Nutzdatenzeilen pro Seite (siehe "Seitenteilung" unten); mit `--columns` die Zeilen nach dem Aufteilen in Spalten, eine Seite fasst dann `--lines` × `--columns` Nutzdatenzeilen. Default: keine Seitenteilung |
-| `--columns` | Spaltenzahl pro Seite (Default 1). Die Nutzdatenzeilen jeder Seite werden spaltenweise verteilt (erst Spalte 1 von oben nach unten, dann Spalte 2, …), jede Spalte ist so breit wie eine Nutzdatenzeile (höchstens `--width`), Trenner ist ` ### `. Präambel und Header bleiben einspaltig, nutzen aber die volle Breite aller Spalten. `decode.py` erkennt das Layout automatisch |
+| `--columns` | Ab Formatversion 4: Spaltenzahl pro Seite (Default 1). Die Nutzdatenzeilen jeder Seite werden spaltenweise verteilt (erst Spalte 1 von oben nach unten, dann Spalte 2, …), jede Spalte ist so breit wie eine Nutzdatenzeile (höchstens `--width`), Trenner ist ` ### `. Präambel und Header bleiben einspaltig, nutzen aber die volle Breite aller Spalten. `decode.py` erkennt das Layout automatisch |
 | `--filename` | Im Header gespeicherter Name (Default: Basisname der Eingabedatei) |
-| `--no-scramble` | Nutzdaten nicht verwürfeln (siehe "Folgen gleicher Zeichen" unten). Default: verwürfelt |
+| `--no-scramble` | Ab Formatversion 4: Nutzdaten nicht verwürfeln (siehe "Folgen gleicher Zeichen" unten). Default: verwürfelt |
 | `--progress` | Fortschrittsbalken auf stderr anzeigen |
 | `--show-preset <preset>` | Gibt alle Zeichen aus, die eine mit diesem Preset kodierte Datei enthalten kann (Header-Alphabet + Preset-Alphabet), als eine UTF-8-Zeile auf stdout, und beendet sich, ohne etwas zu kodieren. Gedacht für Tesseracts `tessedit_char_whitelist` |
 
@@ -247,6 +249,40 @@ es unter "Codewoerter/Zeile". Ist eine breite Zeile bei der Darstellung zu
 lang für das Terminal, bricht dieses sie um — die Breite muss also zum
 Terminal passen (`tput cols` bzw. `$COLUMNS` liefert die verfügbare Breite).
 
+## Ältere Formatversionen erzeugen
+
+Hat der Empfänger nur einen älteren `decode.py`, erzeugt
+`encode.py --format-version N` eine Datei, die dieser lesen kann. Die
+Optionen richten sich nach der gewählten Version und entsprechen dem
+damaligen Umfang. `encode.py --format-version N --help` zeigt sie,
+versionsfremde Optionen werden als unbekannt abgelehnt.
+
+| Version | Formatrelevante Optionen | Presets / `--alphabet` | Zeilenbreite |
+|---|---|---|---|
+| 3 | `--width`, `--preset`/`--alphabet`, `--redundancy`, `--parity-symbols`, `--lines` | `default`, `ascii64`, `latin128`, `utf8128`, `utf16le128`, `utf16le256`; Alphabete bis 256 Zeichen | ein Codewort je Zeile |
+| 4 | wie 3 + `--columns`, `--no-scramble` (Standard: verwürfelt) | alle, bis 512 Zeichen | ein Codewort je Zeile |
+| 5 | wie 4 (Zeilen-CRC erfasst bei 512er-Alphabeten das volle Symbol) | alle | ein Codewort je Zeile |
+| 6 | wie 5 | alle | beliebig (verschränkte Codewörter) |
+
+`-o`, `--filename`, `--progress` und `--show-preset` betreffen nicht das
+Dateiformat und stehen in jeder Version zur Verfügung.
+
+**Zeilenbreite bis Version 5:** Eine Zeile fasst genau ein RS-Codewort, also
+höchstens Alphabetgröße − 1 Symbole, dazu 6 Zeichen CRC und die
+Zeilennummer (1 Zeichen bis 64 Zeilen, 2 bis 4096, 3 bis 262144). Beim
+64er-Alphabet sind das 70 bis 72 Zeichen, beim 32er 38 bis 40; ab 128
+Zeichen begrenzt das den Default 100 nicht. Ist der Default zu breit,
+kürzt `encode.py` ihn mit einem Hinweis auf stderr; ein ausdrücklich
+angegebenes zu großes `--width` ist ein Fehler.
+
+**Frühe Version-3-Decoder** (vor Einführung der UTF-32-Presets) kennen nur
+UTF-8/UTF-16LE und Alphabete bis 256 Zeichen. Deshalb bietet
+`--format-version 3` nur diese an.
+
+Kompatibilität ist geprüft, indem Dateien jeder Version mit den
+`decode.py`-Ständen der jeweiligen Version aus der Git-Historie gelesen
+wurden (v3: `095e06f` und `1154488`, v4: `96b7188`, v5: `d7ce0b3`).
+
 ## Wichtiger Fakt zur Fehlerkorrektur
 
 **r Paritätssymbole korrigieren nicht r Fehler, sondern nur `floor(r/2)`
@@ -371,7 +407,8 @@ Encoding-Varianten der Presets (UTF-8, UTF-16LE, UTF-32, als „ANSI“
 gespeichertes Latin-1), Seitenteilung (gemischte Reihenfolge, Einzeldateien,
 Glob-Pattern, fehlende Seite, BOM-Verhalten), Spaltenlayout, `--header`,
 `--show-preset`, Verwürfelung, Längenreparatur, leere Dateien, Lesefehler in
-Zeilennummern, Exitcodes, Seitenzahl-Obergrenze, `reframe.py` und
+Zeilennummern, Exitcodes, Seitenzahl-Obergrenze, `--format-version`
+(Roundtrip und Optionsumfang je Version), `reframe.py` und
 `archive2git.py` (letzteres nur, wenn `git` installiert ist).
 
 ## Projektstruktur
@@ -381,6 +418,7 @@ bin/            Startskripte (encode.py, decode.py, reframe.py) und archive2git.
 airgap/         Paket mit der eigentlichen Implementierung
   encode.py, decode.py, reframe.py   Kommandozeilen-Logik (python3 -m airgap.<name>)
   encoder.py    gemeinsame Encode-Pipeline (Layout, Zeilen, Seiten, Ausgabe)
+  encode_options.py  formatrelevante Optionen von encode.py, eine Klasse je Formatversion
   framing.py    Aufbau/Parsen einer Nutzdatenzeile, Layout, Längenreparatur, Spalten
   header.py     Header-Felder, Präambel, 3-fach-Kopien mit Mehrheitsentscheid
   formats/      eine Klasse je Formatversion (v3.py … v6.py, linear voneinander
