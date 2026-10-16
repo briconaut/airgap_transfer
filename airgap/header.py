@@ -231,7 +231,23 @@ def build_header_lines(header_bytes: bytes, line_width: int, header_alpha: Alpha
     return preamble, lines
 
 
+@dataclass(frozen=True)
+class HeaderCopyStats:
+    """Qualitaet der 3-fach-Kopien eines Headers (fuer decode.py --check)."""
+    lines: int  # Header-Zeilen je Kopie
+    min_copies: int  # kleinste Zahl lesbarer Kopien einer Header-Zeile
+    missing_copies: int  # nicht lesbare Kopien ueber alle Header-Zeilen
+    disagreements: int  # Symbolpositionen, an denen sich die Kopien widersprechen
+
+
 def parse_header_lines(preamble_line: str, body_lines, header_alpha: Alphabet) -> bytes:
+    return parse_header_lines_with_stats(preamble_line, body_lines, header_alpha)[0]
+
+
+def parse_header_lines_with_stats(preamble_line: str, body_lines,
+                                  header_alpha: Alphabet) -> tuple[bytes, HeaderCopyStats]:
+    """Wie parse_header_lines, zusaetzlich mit Statistik ueber die Kopien.
+    Rueckgabe: (header_rohbytes, HeaderCopyStats)."""
     n = parse_preamble(preamble_line, header_alpha)
     expected_total = n * HEADER_COPIES
     # Bewusst KEIN harter Abbruch bei zu wenigen Zeilen: jede Header-Zeile
@@ -258,22 +274,33 @@ def parse_header_lines(preamble_line: str, body_lines, header_alpha: Alphabet) -
             by_line_idx[line_idx].append(symbols[HEADER_PREFIX_WIDTH:])
 
     all_symbols = []
+    disagreements = 0
     for i in range(n):
         copies = by_line_idx[i]
         if not copies:
             raise HeaderError(f"Header-Zeile {i}: keine einzige Kopie lesbar.")
-        all_symbols.extend(_majority_vote(copies))
+        voted, n_disagree = _majority_vote(copies)
+        all_symbols.extend(voted)
+        disagreements += n_disagree
 
-    return header_alpha.symbols_to_bytes(all_symbols)  # floor-trick, kein expected_length noetig
+    counts = [min(len(by_line_idx[i]), HEADER_COPIES) for i in range(n)]
+    stats = HeaderCopyStats(lines=n, min_copies=min(counts, default=HEADER_COPIES),
+                            missing_copies=sum(HEADER_COPIES - c for c in counts),
+                            disagreements=disagreements)
+    # floor-trick, kein expected_length noetig
+    return header_alpha.symbols_to_bytes(all_symbols), stats
 
 
 def _majority_vote(copies):
     """copies: Liste von Symbol-Listen (i.d.R. bis zu 3, ggf. unterschiedlich
     lang bei Kopien mit Leseartefakten). Mehrheitsentscheid pro Position ueber
     die Kopien, die an dieser Position ueberhaupt ein Symbol haben (bei
-    Gleichstand gewinnt die zuerst gelesene Kopie)."""
+    Gleichstand gewinnt die zuerst gelesene Kopie).
+    Rueckgabe: (symbole, anzahl_positionen_mit_widerspruechlichen_kopien)."""
     max_len = max(len(c) for c in copies)
-    return [
-        Counter(c[pos] for c in copies if pos < len(c)).most_common(1)[0][0]
-        for pos in range(max_len)
-    ]
+    voted, disagreements = [], 0
+    for pos in range(max_len):
+        counter = Counter(c[pos] for c in copies if pos < len(c))
+        voted.append(counter.most_common(1)[0][0])
+        disagreements += len(counter) > 1
+    return voted, disagreements

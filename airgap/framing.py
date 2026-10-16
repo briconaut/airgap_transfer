@@ -211,6 +211,7 @@ class LineResult:
     data: list[int] | None = None
     reason: str | None = None
     repaired: str | None = None  # Beschreibung einer Laengenreparatur, sonst None
+    corrections: int = 0  # von Reed-Solomon korrigierte Symbole (nur bei Status OK)
 
 
 def parse_payload_line(raw: str, code: LineCode, ln_width: int, crc_width: int,
@@ -244,30 +245,31 @@ def parse_payload_line(raw: str, code: LineCode, ln_width: int, crc_width: int,
                           reason="Nutzdatenteil nicht im Nutzdaten-Alphabet lesbar")
 
     if len(payload_symbols) == code.encoded_len:
-        status, decoded, reason = _decode_payload(payload_symbols, code, expected_crc, wide_crc)
+        status, decoded, reason, num_errors = _decode_payload(payload_symbols, code, expected_crc, wide_crc)
         if status == LineStatus.OK:
-            return LineResult(line_number, status, data=decoded)
+            return LineResult(line_number, status, data=decoded, corrections=num_errors)
     else:
         status, decoded, reason = (LineStatus.UNCORRECTABLE, None,
                                    f"Erwartet {code.encoded_len} Symbole, {len(payload_symbols)} vorhanden")
 
     repair = _repair_shifted_payload(payload_raw, code, expected_crc, payload_alpha, wide_crc)
     if repair is not None:
-        decoded, description = repair
-        return LineResult(line_number, LineStatus.OK, data=decoded, repaired=description)
+        decoded, description, num_errors = repair
+        return LineResult(line_number, LineStatus.OK, data=decoded, repaired=description,
+                          corrections=num_errors)
     return LineResult(line_number, status, data=decoded, reason=reason)
 
 
 def _decode_payload(payload_symbols, code: LineCode, expected_crc: int, wide_crc: bool):
     """RS-Korrektur aller Codewoerter + CRC-Pruefung des Nutzteils einer Zeile.
-    Rueckgabe: (status, daten oder None, grund oder None)."""
+    Rueckgabe: (status, daten oder None, grund oder None, korrigierte Symbole)."""
     decoded, num_errors = code.decode(payload_symbols)
     if decoded is None:
-        return LineStatus.UNCORRECTABLE, None, "Reed-Solomon: zu viele Fehler in dieser Zeile"
+        return LineStatus.UNCORRECTABLE, None, "Reed-Solomon: zu viele Fehler in dieser Zeile", 0
     if symbols_crc32(decoded, wide_crc) != expected_crc:
         return (LineStatus.CORRECTED_SUSPECT, decoded,
-                f"RS meldet {num_errors} korrigierte Fehler, aber CRC passt danach nicht")
-    return LineStatus.OK, decoded, None
+                f"RS meldet {num_errors} korrigierte Fehler, aber CRC passt danach nicht", num_errors)
+    return LineStatus.OK, decoded, None, num_errors
 
 
 # Groesste Laengenabweichung (in Zeichen), die _repair_shifted_payload noch
@@ -337,7 +339,7 @@ def _repair_shifted_payload(payload_raw: str, code: LineCode, expected_crc: int,
     akzeptiert nur eine, die RS dekodieren kann UND deren CRC32 stimmt - bei
     der Vielzahl an Kandidaten ist der CRC die eigentliche Absicherung gegen
     Falsch-Positive. Bei mehreren Treffern gewinnt der mit den wenigsten
-    RS-Korrekturen. Rueckgabe: (daten, beschreibung) oder None."""
+    RS-Korrekturen. Rueckgabe: (daten, beschreibung, korrigierte Symbole) oder None."""
     delta = len(payload_raw) - code.encoded_len
     if abs(delta) > MAX_SHIFT_REPAIR:
         return None
@@ -361,7 +363,7 @@ def _repair_shifted_payload(payload_raw: str, code: LineCode, expected_crc: int,
         f"'{payload_raw[pos]}' {'eingefuegt' if change > 0 else 'entfernt'} (Folge ab Position {pos})"
         for pos, change in ops
     ]
-    return decoded, "; ".join(parts) + f", danach {num_errors} RS-Korrektur(en)"
+    return decoded, "; ".join(parts) + f", danach {num_errors} RS-Korrektur(en)", num_errors
 
 
 def reflow_joined_lines(lines, expected_width: int):
