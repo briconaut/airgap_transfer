@@ -62,6 +62,7 @@ aus dem Projektverzeichnis.
 | `-o/--output` | Basisname der Ausgabe (Default `output`) |
 | `--error-report-format` | `text` (Default) oder `json` |
 | `--header` | Nur die Header aller Seiten jeder Eingabedatei ausgeben (nach stdout); Nutzdaten werden nicht verarbeitet, `-o` wird ignoriert |
+| `--check` | Wie `--header`, prüft aber zusätzlich alle Prüfsummen: je Seite Header-Kopien (lesbare Kopien, abweichende Positionen), Encoding-Cross-Check und CRC32/Reed-Solomon jeder Nutzdatenzeile (inkl. Zahl der RS-Korrekturen und Längenreparaturen, defekte und nicht zuordenbare Zeilen einzeln); danach je Dokument-ID fehlende Seiten/Zeilen, Seiten-Prüfsummen und SHA-256. Schreibt keine Dateien, `-o` wird ignoriert; nicht mit `--header` kombinierbar. Exitcodes: `0` alles OK (RS-Korrekturen erlaubt), `1` keine verwertbare Seite, `3` etwas fehlt/ist unlesbar, `4` alles gelesen, aber Seiten-Prüfsumme oder SHA-256 falsch |
 
 `encode.py` meldet Layout (k, r, Zeilenzahl) und Hinweise auf stderr.
 Exitcodes: `0` Erfolg, `1` Eingabedatei nicht lesbar, `2` ungültige

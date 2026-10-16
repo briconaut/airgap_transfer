@@ -668,6 +668,67 @@ def test_header_only():
     print(f" OK: {len(pages)} Header ausgegeben, keine Ausgabedatei geschrieben")
 
 
+def test_check():
+    print("== Test 36: --check prueft alle Pruefsummen, schreibt nichts ==")
+    src, enc, out = f"{WORKDIR}/t36_src.bin", f"{WORKDIR}/t36_enc.txt", f"{WORKDIR}/t36_out"
+    damaged = f"{WORKDIR}/t36_damaged.txt"
+    make_test_file(src, 8_000)
+    r = run([sys.executable, ENCODE, src, "-o", enc, "--width", "80", "--redundancy", "30", "--lines", "15"])
+    assert r.returncode == 0, r.stderr
+    r_val = int(r.stderr.split("r=")[1].split(" ")[0])
+
+    # (a) unbeschaedigt: Exitcode 0, keine Ausgabedatei
+    r = run([sys.executable, DECODE, "--check", enc, "-o", out])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Encoding-Check:      OK (UTF-8)" in r.stdout, r.stdout
+    assert "SHA-256:             OK" in r.stdout, r.stdout
+    assert "abweichende Position(en)" in r.stdout and "== Dokument " in r.stdout, r.stdout
+    assert not glob.glob(f"{out}*"), "--check darf keine Ausgabedatei schreiben"
+
+    # (b) eine Seite fehlt, auf Seite 0 eine Zeile RS-korrigierbar, eine nicht
+    # korrigierbar, eine mit unlesbarer Zeilennummer
+    with open(enc) as f:
+        pages = split_pages(f.read().split("\n"))
+    assert len(pages) >= 4, len(pages)
+    del pages[2]
+    page0 = pages[0]
+    header_alpha = Alphabet(DEFAULT_ALPHABET)
+    first = 1 + parse_preamble(page0[0], header_alpha) * HEADER_COPIES
+    idx = [i for i in range(first, len(page0)) if page0[i].strip()]
+    page0[idx[1]] = corrupt_symbols_in_line(page0[idx[1]], r_val // 2, 10, DEFAULT_ALPHABET)
+    page0[idx[3]] = corrupt_symbols_in_line(page0[idx[3]], 3 * r_val, 10, DEFAULT_ALPHABET)
+    page0[idx[5]] = "!!" + page0[idx[5]][2:]
+    with open(damaged, "w") as f:
+        f.write("\n".join("\n".join(p) for p in pages))
+    r = run([sys.executable, DECODE, "--check", damaged, "-o", out])
+    assert r.returncode == EXIT_INCOMPLETE, r.stdout + r.stderr
+    assert "davon 1 RS-korrigiert" in r.stdout, r.stdout
+    assert "Zeile 3: verworfen" in r.stdout, r.stdout
+    assert "nicht zuordenbar: Zeilennummer" in r.stdout, r.stdout
+    assert "fehlend: 2\n" in r.stdout, r.stdout  # Seite 2
+    assert "SHA-256:             uebersprungen (unvollstaendig)" in r.stdout, r.stdout
+    assert not glob.glob(f"{out}*"), "--check darf keine Ausgabedatei schreiben"
+
+    # (c) alle Zeilen lesbar, aber Datei falsch (vertauschte Zeilennummern) -> 4
+    single = f"{WORKDIR}/t36_single.txt"
+    r = run([sys.executable, ENCODE, src, "-o", single, "--no-scramble"])
+    assert r.returncode == 0, r.stderr
+    with open(single) as f:
+        lines = f.read().split("\n")
+    a, b = payload_line_indices(lines)[3:5]
+    lines[a], lines[b] = lines[b][:2] + lines[a][2:], lines[a][:2] + lines[b][2:]
+    with open(single, "w") as f:
+        f.write("\n".join(lines))
+    r = run([sys.executable, DECODE, "--check", single])
+    assert r.returncode == EXIT_HASH_MISMATCH, r.stdout + r.stderr
+    assert "SHA-256:             FEHLGESCHLAGEN" in r.stdout, r.stdout
+
+    # (d) nicht mit --header kombinierbar
+    r = run([sys.executable, DECODE, "--check", "--header", enc])
+    assert r.returncode == 2, r.stderr
+    print(" OK: Exitcodes 0/3/4/2, Details je Seite und Dokument, keine Ausgabedateien")
+
+
 def test_columns():
     print("== Test 20: --columns verteilt jede Seite auf mehrere Spalten ==")
     src = f"{WORKDIR}/t20_src.bin"

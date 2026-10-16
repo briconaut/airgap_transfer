@@ -20,6 +20,9 @@ Exitcodes:
     2  ungueltige Kommandozeile (argparse)
     3  unvollstaendig rekonstruiert (part1/part2 geschrieben)
     4  vollstaendig rekonstruiert, aber SHA-256 stimmt NICHT
+Mit --check (nur pruefen, nichts schreiben) sinngemaess gleich: 0 alle
+Pruefungen OK, 1 keine einzige verwertbare Seite, 3 etwas fehlt/ist unlesbar,
+4 alles gelesen, aber Seiten-Pruefsumme oder SHA-256 stimmt nicht.
 
 Eingabe kann aus einer einzigen Datei/stdin (ggf. mit mehreren Seiten
 hintereinander, in beliebiger Reihenfolge), mehreren einzelnen Dateien oder
@@ -59,8 +62,8 @@ from .framing import (
 )
 from .formats import get_format, unpack_header
 from .header import (
-    HEADER_COPIES, TEXT_ENCODING_NAMES, TEXT_ENCODING_TO_CODEC, HeaderError, HeaderMeta,
-    find_preamble_positions, parse_header_lines, parse_preamble,
+    HEADER_COPIES, TEXT_ENCODING_NAMES, TEXT_ENCODING_TO_CODEC, HeaderCopyStats, HeaderError,
+    HeaderMeta, find_preamble_positions, parse_header_lines_with_stats, parse_preamble,
 )
 from .rs_codec import GaloisField
 from .scramble import scramble_block
@@ -259,19 +262,31 @@ def _validate_meta(meta: HeaderMeta):
 
 def parse_page_header(seg, header_alpha):
     """seg: Zeilen (ASCII-Sicht) ab einer Praeambel. Rueckgabe: (meta,
-    n_header_body_lines). Wirft HeaderError."""
+    n_header_body_lines, HeaderCopyStats). Wirft HeaderError."""
     preamble_line = seg[0].strip()
     n_header_lines = parse_preamble(preamble_line, header_alpha)
     expected_header_body = n_header_lines * HEADER_COPIES
     body_window = seg[1:1 + expected_header_body]
-    meta = unpack_header(parse_header_lines(preamble_line, body_window, header_alpha))
+    header_bytes, copy_stats = parse_header_lines_with_stats(preamble_line, body_window, header_alpha)
+    meta = unpack_header(header_bytes)
     _validate_meta(meta)
-    return meta, expected_header_body
+    return meta, expected_header_body, copy_stats
 
 
-def format_header(meta: HeaderMeta):
+# Mindestbreite der Beschriftungsspalte, damit Header- und Pruefungszeilen
+# (--header/--check) buendig untereinander stehen
+LABEL_WIDTH = len("Zeilennummer-Breite:")
+
+
+def format_rows(rows) -> str:
+    """rows: Liste von (beschriftung, wert) -> eingerueckte, buendige Zeilen."""
+    width = max([LABEL_WIDTH] + [len(label) + 1 for label, _ in rows])
+    return "\n".join(f"  {label + ':':<{width}} {value}" for label, value in rows)
+
+
+def header_rows(meta: HeaderMeta):
     enc = meta.text_encoding
-    rows = [
+    return [
         ("Formatversion", meta.version),
         ("Verwuerfelt", "ja" if meta.scrambled else "nein"),
         ("Alphabet", meta.alphabet_label),
@@ -286,8 +301,10 @@ def format_header(meta: HeaderMeta):
         ("SHA-256", meta.sha256.hex()),
         ("Dateiname", meta.filename or "(keiner gespeichert)"),
     ]
-    width = max(len(label) for label, _ in rows) + 1
-    return "\n".join(f"  {label + ':':<{width}} {value}" for label, value in rows)
+
+
+def format_header(meta: HeaderMeta):
+    return format_rows(header_rows(meta))
 
 
 def print_headers(sources) -> bool:
@@ -311,7 +328,7 @@ def print_headers(sources) -> bool:
             continue
         for start in positions:
             try:
-                meta, _ = parse_page_header(lines[start:], header_alpha)
+                meta, _, _ = parse_page_header(lines[start:], header_alpha)
             except HeaderError as e:
                 print(f"  Zeile {start + 1}: Header nicht rekonstruierbar ({e})")
                 all_ok = False
@@ -328,22 +345,32 @@ class Page:
     rest_lines: list[str]  # Zeilen nach dem Header bis zur naechsten Praeambel (Nutzdaten-Sicht)
 
 
-def read_pages(header_lines, payload_lines, source_ranges, header_alpha) -> list[Page]:
-    """Pass 1: findet und parst alle Seiten-Header. Header-Fehler sind hier
-    NICHT fatal fuer den ganzen Lauf - nur die betroffene Seite faellt aus."""
-    preamble_positions = find_preamble_positions(header_lines, header_alpha)
-    if not preamble_positions:
-        raise FatalError("FEHLER (Praeambel): keine gueltige Seiten-Praeambel in der Eingabe gefunden.")
+@dataclass
+class PageScan:
+    """Ergebnis von Pass 1 fuer eine gefundene Praeambel."""
+    start: int  # Index der Praeambel im kombinierten Zeilenstrom
+    meta: HeaderMeta | None = None  # None, wenn der Header nicht rekonstruierbar war
+    copy_stats: HeaderCopyStats | None = None
+    error: str | None = None  # Grund, warum die Seite nicht verwertbar ist
+    page: Page | None = None  # nur bei verwertbarer Seite
 
-    pages = []
+
+def scan_pages(header_lines, payload_lines, source_ranges, header_alpha) -> list[PageScan]:
+    """Pass 1: findet und parst alle Seiten-Header. Header-Fehler sind hier
+    NICHT fatal fuer den ganzen Lauf - nur die betroffene Seite faellt aus
+    (PageScan.error gesetzt, PageScan.page None)."""
+    preamble_positions = find_preamble_positions(header_lines, header_alpha)
+    scans = []
     ends = preamble_positions[1:] + [len(header_lines)]
     for start, end in zip(preamble_positions, ends):
+        scan = PageScan(start)
+        scans.append(scan)
         try:
-            meta, expected_header_body = parse_page_header(header_lines[start:end], header_alpha)
+            meta, expected_header_body, scan.copy_stats = parse_page_header(header_lines[start:end], header_alpha)
         except HeaderError as e:
-            print(f"Hinweis: Header einer Seite nicht rekonstruierbar ({e}) - diese Seite wird uebersprungen.",
-                  file=sys.stderr)
+            scan.error = f"Header einer Seite nicht rekonstruierbar ({e})"
             continue
+        scan.meta = meta
 
         # Cross-Check: von dieser Seite deklariertes text_encoding-Feld muss
         # zum tatsaechlich per Byte-Sniffing erkannten Encoding ihrer Quelle
@@ -354,14 +381,24 @@ def read_pages(header_lines, payload_lines, source_ranges, header_alpha) -> list
         declared_encoding = TEXT_ENCODING_TO_CODEC[meta.text_encoding]
         sniffed_encoding = encoding_at(start, source_ranges)
         if declared_encoding != sniffed_encoding:
-            print(
-                f"Hinweis: Seite deklariert Encoding {declared_encoding!r}, wurde aber als "
-                f"{sniffed_encoding!r} gelesen - diese Seite wird uebersprungen.",
-                file=sys.stderr,
-            )
+            scan.error = (f"Seite deklariert Encoding {declared_encoding!r}, wurde aber als "
+                          f"{sniffed_encoding!r} gelesen")
             continue
 
-        pages.append(Page(meta=meta, rest_lines=payload_lines[start + 1 + expected_header_body:end]))
+        scan.page = Page(meta=meta, rest_lines=payload_lines[start + 1 + expected_header_body:end])
+    return scans
+
+
+def read_pages(header_lines, payload_lines, source_ranges, header_alpha) -> list[Page]:
+    """Pass 1 fuer den normalen Decode (siehe scan_pages): nicht verwertbare
+    Seiten werden mit Hinweis uebersprungen."""
+    scans = scan_pages(header_lines, payload_lines, source_ranges, header_alpha)
+    if not scans:
+        raise FatalError("FEHLER (Praeambel): keine gueltige Seiten-Praeambel in der Eingabe gefunden.")
+    for scan in scans:
+        if scan.error:
+            print(f"Hinweis: {scan.error} - diese Seite wird uebersprungen.", file=sys.stderr)
+    pages = [scan.page for scan in scans if scan.page is not None]
 
     if not pages:
         raise FatalError("FEHLER (Header nicht rekonstruierbar): keine einzige Seite hatte einen lesbaren Header.")
@@ -430,6 +467,29 @@ class LineCollection:
     parse_errors: list  # LineResults ohne verwertbare Zeilennummer
     page_line_ranges: dict  # page_number -> (min_ln, max_ln) der plausiblen Zeilen dieser Seite
     total_rejoined: int
+    per_page: list  # je Seite (in Reihenfolge von `pages`): Liste von (roh_zeile, LineResult)
+
+
+def parse_page_lines(page: Page, ctx: DecodeContext):
+    """Parst die Nutzdatenzeilen einer Seite (ohne Zusammenfuehrung ueber
+    Seiten). Zeilennummern ausserhalb 0..total_lines-1 sind sicher falsch und
+    werden zu "nicht zuordenbar" (line_number None).
+    Rueckgabe: (Liste von (roh_zeile, LineResult), Anzahl aufgeteilter Roh-Zeilen)."""
+    rest_lines, n_rejoined = reflow_joined_lines(page.rest_lines, ctx.payload_line_width)
+    parsed = []
+    for raw in rest_lines:
+        res = ctx.parse(raw)
+        if res is None:
+            continue  # komplett leere Zeile -> ignorieren
+        if res.line_number is not None and res.line_number >= ctx.total_lines:
+            res = LineResult(
+                None, res.status, reason=(
+                    f"Zeilennummer {res.line_number} ausserhalb 0..{ctx.total_lines - 1} "
+                    f"(Lesefehler im Zeilennummernfeld?)"
+                ),
+            )
+        parsed.append((raw, res))
+    return parsed, n_rejoined
 
 
 def collect_lines(pages: list[Page], ctx: DecodeContext) -> LineCollection:
@@ -450,26 +510,14 @@ def collect_lines(pages: list[Page], ctx: DecodeContext) -> LineCollection:
     parse_errors = []
     page_line_ranges = {}
     total_rejoined = 0
+    per_page = []
 
     for page in pages:
-        rest_lines, n_rejoined = reflow_joined_lines(page.rest_lines, ctx.payload_line_width)
+        parsed_raw, n_rejoined = parse_page_lines(page, ctx)
         total_rejoined += n_rejoined
-
-        parsed = []
-        for raw in rest_lines:
-            res = ctx.parse(raw)
-            if res is None:
-                continue  # komplett leere Zeile -> ignorieren
-            if res.line_number is not None and res.line_number >= ctx.total_lines:
-                res = LineResult(
-                    None, res.status, reason=(
-                        f"Zeilennummer {res.line_number} ausserhalb 0..{ctx.total_lines - 1} "
-                        f"(Lesefehler im Zeilennummernfeld?)"
-                    ),
-                )
-            if res.line_number is None:
-                parse_errors.append(res)
-            parsed.append(res)
+        per_page.append(parsed_raw)
+        parsed = [res for _, res in parsed_raw]
+        parse_errors.extend(res for res in parsed if res.line_number is None)
 
         page_lns, supported_lns = [], []
         for j, res in enumerate(parsed):
@@ -488,7 +536,7 @@ def collect_lines(pages: list[Page], ctx: DecodeContext) -> LineCollection:
             page_line_ranges[page.meta.page_number] = (min(range_lns), max(range_lns))
 
     results = {ln: _resolve(ln, cands) for ln, cands in candidates.items()}
-    return LineCollection(results, parse_errors, page_line_ranges, total_rejoined)
+    return LineCollection(results, parse_errors, page_line_ranges, total_rejoined, per_page)
 
 
 def _resolve(ln: int, cands: list[_Candidate]) -> LineResult:
@@ -617,10 +665,187 @@ def write_report(args, status, hash_status, bad_lines, parse_errors, total_lines
                 f.write(f"  {r.status.value} - {r.reason}\n")
 
 
+# ---------------------------------------------------------------------------
+# --check: alle Pruefsummen pruefen, nichts schreiben
+# ---------------------------------------------------------------------------
+
+SNIPPET_LEN = 20  # Zeichen einer nicht zuordenbaren Roh-Zeile in der --check-Ausgabe
+
+
+def format_ranges(numbers) -> str:
+    """Sortierte Zahlen als zusammengefasste Bereiche: [1, 2, 3, 7] -> '1..3, 7'."""
+    parts = []
+    for n in numbers:
+        if parts and parts[-1][1] == n - 1:
+            parts[-1][1] = n
+        else:
+            parts.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}..{b}" for a, b in parts)
+
+
+def _snippet(raw: str) -> str:
+    s = raw.strip()
+    return s if len(s) <= SNIPPET_LEN else s[:SNIPPET_LEN] + "..."
+
+
+def _check_page(scan: PageScan, parsed) -> tuple[str, bool]:
+    """Pruefungsausgabe einer Seite mit lesbarem Header. parsed: Liste von
+    (roh_zeile, LineResult) dieser Seite, None bei nicht verwertbarer Seite.
+    Rueckgabe: (text, ok)."""
+    meta, st = scan.meta, scan.copy_stats
+    total_copies = st.lines * HEADER_COPIES
+    rows = header_rows(meta) + [
+        ("Header-Kopien", f"{total_copies - st.missing_copies}/{total_copies} lesbar "
+                          f"({st.lines} Zeile(n) je Kopie), {st.disagreements} abweichende Position(en)"),
+    ]
+    if scan.error:
+        rows.append(("Encoding-Check", f"FEHLER: {scan.error} - Seite wird bei der Dokumentpruefung "
+                                       f"nicht beruecksichtigt"))
+        return format_rows(rows), False
+    rows.append(("Encoding-Check", f"OK ({TEXT_ENCODING_NAMES[meta.text_encoding]})"))
+
+    results = [res for _, res in parsed]
+    if not results:
+        rows.append(("Nutzdatenzeilen", "FEHLER: keine Nutzdatenzeile gefunden"))
+        return format_rows(rows), False
+
+    ok = [r for r in results if r.status == LineStatus.OK and r.line_number is not None]
+    rs_corrected = [r for r in ok if r.corrections and not r.repaired]
+    repaired = [r for r in ok if r.repaired]
+    bad = [r for r in results if r.status != LineStatus.OK and r.line_number is not None]
+    unassignable = [(raw, r) for raw, r in parsed if r.line_number is None]
+    numbers = [r.line_number for r in results if r.line_number is not None]
+
+    summary = f"{len(results)}"
+    if numbers:
+        summary += f" (Nr. {min(numbers)}..{max(numbers)})"
+    summary += f": {len(ok)} OK"
+    if rs_corrected:
+        summary += (f", davon {len(rs_corrected)} RS-korrigiert "
+                    f"({sum(r.corrections for r in rs_corrected)} Symbole)")
+    if repaired:
+        summary += f", davon {len(repaired)} laengenrepariert"
+    for status in (LineStatus.CORRECTED_SUSPECT, LineStatus.UNCORRECTABLE):
+        n = sum(r.status == status for r in bad)
+        if n:
+            summary += f", {n} {status.value}"
+    if unassignable:
+        summary += f", {len(unassignable)} nicht zuordenbar"
+    rows.append(("Nutzdatenzeilen", summary))
+
+    details = [f"    Zeile {r.line_number}: laengenrepariert - {r.repaired}" for r in repaired]
+    details += [f"    Zeile {r.line_number}: {r.status.value} - {r.reason}" for r in bad]
+    details += [f"    nicht zuordenbar: {r.reason}: '{_snippet(raw)}'"
+                for raw, r in unassignable]
+    return "\n".join([format_rows(rows)] + details), not bad and not unassignable
+
+
+def _check_document(pages: list[Page], ctx: DecodeContext, lines: LineCollection) -> tuple[str, int]:
+    """Dokumentweite Pruefung (Seiten-Pruefsummen, Vollstaendigkeit, SHA-256).
+    Rueckgabe: (text, exitcode)."""
+    meta = ctx.meta
+    asm = assemble(lines.results, ctx)
+    seen = sorted({p.meta.page_number for p in pages})
+    missing_pages = sorted(set(range(meta.page_count)) - set(seen))
+    bad_pages = dict(verify_pages(pages, lines.page_line_ranges, asm.full_bytes, ctx))
+
+    pages_value = f"{len(seen)} von {meta.page_count} gelesen"
+    if missing_pages:
+        pages_value += f", fehlend: {format_ranges(missing_pages)}"
+    n_ok_lines = ctx.total_lines - len(asm.bad_lines)
+    complete = asm.first_bad_line is None
+    if complete:
+        hash_ok = hashlib.sha256(asm.full_bytes).digest() == meta.sha256
+        hash_value = "OK" if hash_ok else "FEHLGESCHLAGEN"
+    else:
+        hash_ok, hash_value = False, "uebersprungen (unvollstaendig)"
+    rows = [
+        ("Seiten", pages_value),
+        ("Seiten-Pruefsummen", f"{len(seen) - len(bad_pages)} von {len(seen)} OK"),
+        ("Nutzdatenzeilen", f"{n_ok_lines} von {ctx.total_lines} OK"),
+        ("SHA-256", hash_value),
+    ]
+
+    page_details = [f"    Seite {pn}: {reason}" for pn, reason in sorted(bad_pages.items())]
+    missing_lines = [ln for ln, st, _ in asm.bad_lines if st == LineStatus.MISSING.value]
+    line_details = [f"    Zeile {ln}: {st} - {reason}"
+                    for ln, st, reason in asm.bad_lines if st != LineStatus.MISSING.value]
+    if missing_lines:
+        line_details.insert(0, f"    fehlend: {format_ranges(missing_lines)}")
+    text = "\n".join([format_rows(rows[:2])] + page_details + [format_rows(rows[2:3])]
+                     + line_details + [format_rows(rows[3:])])
+
+    if not complete or missing_pages:
+        return text, EXIT_INCOMPLETE
+    if bad_pages or not hash_ok:
+        return text, EXIT_HASH_MISMATCH
+    return text, EXIT_OK
+
+
+def check_sources(sources) -> int:
+    """--check: gibt wie --header die Header aller Seiten je Quelle aus und
+    prueft zusaetzlich alle Pruefsummen (Header-Kopien, Encoding-Cross-Check,
+    CRC32/Reed-Solomon jeder Nutzdatenzeile, danach je Dokument-ID die
+    Seiten-Pruefsummen und SHA-256). Schreibt keine Dateien.
+    Rueckgabe: Exitcode (0 alles OK, 1 keine verwertbare Seite, 3 etwas
+    fehlt/ist unlesbar, 4 alles gelesen, aber Seiten-Pruefsumme/SHA-256 falsch)."""
+    sys.stdout.reconfigure(errors="backslashreplace")
+    header_alpha = Alphabet(HEADER_ALPHABET)
+    header_lines, payload_lines, source_ranges = read_all_input_lines(sources)
+    scans = scan_pages(header_lines, payload_lines, source_ranges, header_alpha)
+
+    # Verwertbare Seiten je Dokument-ID (in Reihenfolge des ersten Auftretens)
+    docs = defaultdict(list)
+    for scan in scans:
+        if scan.page is not None:
+            docs[scan.meta.document_id].append(scan.page)
+    checked = {}  # document_id -> (ctx, LineCollection)
+    page_lines = {}  # id(Page) -> Liste von (roh_zeile, LineResult)
+    for doc_id, pages in docs.items():
+        ctx = DecodeContext(pages[0].meta, header_alpha)
+        lines = collect_lines(pages, ctx)
+        page_lines.update((id(p), parsed) for p, parsed in zip(pages, lines.per_page))
+        checked[doc_id] = (ctx, lines)
+
+    exit_code = EXIT_OK
+    blocks = []
+    for (name, _), (src_start, src_end, _) in zip(sources, source_ranges):
+        out = [f"== {name} =="]
+        src_scans = [s for s in scans if src_start <= s.start < src_end]
+        if not src_scans:
+            out.append("  (keine gueltige Seiten-Praeambel gefunden)")
+            exit_code = max(exit_code, EXIT_INCOMPLETE)
+        for scan in src_scans:
+            if scan.meta is None:
+                out.append(f"  Zeile {scan.start - src_start + 1}: {scan.error}")
+                exit_code = max(exit_code, EXIT_INCOMPLETE)
+                continue
+            if len(src_scans) > 1:
+                out.append(f" -- Seite ab Zeile {scan.start - src_start + 1} --")
+            parsed = page_lines.get(id(scan.page)) if scan.page is not None else None
+            text, ok = _check_page(scan, parsed)
+            out.append(text)
+            if not ok:
+                exit_code = max(exit_code, EXIT_INCOMPLETE)
+        blocks.append("\n".join(out))
+
+    for doc_id, pages in docs.items():
+        ctx, lines = checked[doc_id]
+        text, doc_exit = _check_document(pages, ctx, lines)
+        filename = ctx.meta.filename or "ohne Dateinamen"
+        blocks.append(f"== Dokument {doc_id.hex()} ({filename}) ==\n{text}")
+        exit_code = max(exit_code, doc_exit)
+
+    print("\n\n".join(blocks))
+    return exit_code if docs else EXIT_FATAL
+
+
 def decode(args) -> int:
     sources = read_sources(args.input)
     if args.header:
         return EXIT_OK if print_headers(sources) else EXIT_FATAL
+    if args.check:
+        return check_sources(sources)
 
     header_lines, payload_lines, source_ranges = read_all_input_lines(sources)
     if not any(line.strip() for line in header_lines):
@@ -718,9 +943,18 @@ def main() -> int:
     ap.add_argument("-o", "--output", default="output", help="Basisname der Ausgabedatei(en) (Default: 'output')")
     ap.add_argument("--error-report-format", choices=["text", "json"], default="text",
                     help="Format des Fehlerberichts (Default: text)")
-    ap.add_argument(
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
         "--header", action="store_true",
         help="Nur die Header aller Seiten jeder Eingabedatei ausgeben, Nutzdaten nicht verarbeiten",
+    )
+    mode.add_argument(
+        "--check", action="store_true",
+        help=(
+            "Wie --header, prueft zusaetzlich alle Pruefsummen (Header-Kopien, Zeilen-CRC32/"
+            "Reed-Solomon, Seiten-Pruefsummen, SHA-256); schreibt keine Dateien, -o wird ignoriert. "
+            "Exitcodes wie beim Decode (0/1/3/4)"
+        ),
     )
     args = ap.parse_args()
     try:
